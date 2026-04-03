@@ -30,6 +30,7 @@ class MediaGrid {
         this.masonryRows = 4;
         this.mediaDimensions = new Map();
         this.mediaMetrics = new Map();
+        this.aspectProfiles = new Map();
 
         this.settings = {
             gridMode: "uniform", // 'uniform' | 'masonry' | 'smart-masonry'
@@ -83,9 +84,8 @@ class MediaGrid {
         for (let i = 0; i < lookahead; i++) {
             const candidate = this.pool[i];
             const cacheKey = candidate.path || candidate.url;
-            const metadata = this.mediaMetrics.get(cacheKey);
-            const candidateAspect = metadata?.aspect || this._estimatedAspect(candidate.type);
-            const uncertaintyPenalty = metadata ? 0 : 0.2;
+            const candidateAspect = this._getMediaAspect(candidate);
+            const uncertaintyPenalty = this.mediaMetrics.has(cacheKey) ? 0 : 0.2;
             const score = Math.abs(Math.log(candidateAspect / preferredAspect)) + uncertaintyPenalty;
 
             if (score < bestScore) {
@@ -100,9 +100,12 @@ class MediaGrid {
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
-    setMedia(files) {
+    async setMedia(files) {
+        this.mediaDimensions.clear();
+        this.mediaMetrics.clear();
+        this.aspectProfiles.clear();
         this.mediaFiles = files;
-        this._primeMediaMeasurements(files);
+        await this._primeMediaMeasurements(files);
         this.reshufflePool();
     }
 
@@ -154,7 +157,7 @@ class MediaGrid {
 
             for (let i = 0; i < visibleSlots; i++) this._addCell(targetAspect);
         } else {
-            const { columns, rows } = this._masonryGridDimensions(visibleSlots);
+            const { columns, rows } = this._masonryGridDimensions(visibleSlots, gridMode);
             this.gridEl.style.gridAutoRows = "";
             this.gridEl.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
             this.gridEl.style.gridTemplateRows = `repeat(${rows}, minmax(0, 1fr))`;
@@ -197,11 +200,11 @@ class MediaGrid {
         return best;
     }
 
-    _masonryGridDimensions(slotCount) {
+    _masonryGridDimensions(slotCount, gridMode = this.settings.gridMode) {
         const w = this.gridEl.clientWidth || window.innerWidth;
         const h = this.gridEl.clientHeight || window.innerHeight;
         const viewportAspect = w / Math.max(h, 1);
-        const targetUnits =
+        const baseTargetUnits =
             slotCount <= 4
                 ? slotCount * 4
                 : slotCount <= 8
@@ -209,6 +212,13 @@ class MediaGrid {
                   : slotCount <= 16
                     ? slotCount * 2.75
                     : slotCount * 2.15;
+        const profile = gridMode === "smart-masonry" ? this._getAspectProfile() : null;
+        const spreadFactor = 1 + Math.min(profile?.spread || 0, 0.6) * 0.35;
+        const targetUnits = baseTargetUnits * spreadFactor;
+        const targetGridAspect =
+            gridMode === "smart-masonry" && profile
+                ? viewportAspect * Math.exp(Math.max(-0.45, Math.min(0.45, Math.log(profile.median || 1))) * 0.55)
+                : viewportAspect;
 
         let best = { columns: 4, rows: 3, score: Number.POSITIVE_INFINITY };
 
@@ -217,10 +227,12 @@ class MediaGrid {
                 const units = columns * rows;
                 if (units < slotCount) continue;
 
-                const aspectScore = Math.abs(Math.log(columns / rows / viewportAspect));
+                const gridAspect = columns / rows;
+                const aspectScore = Math.abs(Math.log(gridAspect / targetGridAspect));
                 const densityScore = Math.abs(units - targetUnits) / targetUnits;
                 const coarsePenalty = units < slotCount * 1.5 ? 0.35 : 0;
-                const score = aspectScore + densityScore * 0.85 + coarsePenalty;
+                const profilePenalty = profile ? this._coverCropPenalty(gridAspect, profile.median) * 0.16 : 0;
+                const score = aspectScore + densityScore * 0.85 + coarsePenalty + profilePenalty;
 
                 if (score < best.score) {
                     best = { columns, rows, score };
@@ -522,13 +534,53 @@ class MediaGrid {
     }
 
     _estimatedAspect(type) {
+        const profile = this._getAspectProfile(type);
+        if (profile?.median) return profile.median;
         return type === "video" ? 16 / 9 : 1;
     }
 
-    _primeMediaMeasurements(files) {
-        for (const media of files) {
-            void this._measureMedia(media);
+    _getMediaAspect(media) {
+        const cacheKey = media.path || media.url;
+        return this.mediaMetrics.get(cacheKey)?.aspect || this._estimatedAspect(media.type);
+    }
+
+    _getAspectProfile(filter = this.settings.mediaFilter) {
+        const cacheKey = filter || "mixed";
+        if (this.aspectProfiles.has(cacheKey)) {
+            return this.aspectProfiles.get(cacheKey);
         }
+
+        const aspects = this._filteredMediaFiles(filter)
+            .map((media) => this.mediaMetrics.get(media.path || media.url)?.aspect)
+            .filter((aspect) => Number.isFinite(aspect) && aspect > 0)
+            .sort((a, b) => a - b);
+
+        if (aspects.length === 0) {
+            return null;
+        }
+
+        const logAspects = aspects.map((aspect) => Math.log(aspect));
+        const meanLog = logAspects.reduce((sum, value) => sum + value, 0) / logAspects.length;
+        const variance =
+            logAspects.reduce((sum, value) => {
+                const delta = value - meanLog;
+                return sum + delta * delta;
+            }, 0) / logAspects.length;
+        const profile = {
+            count: aspects.length,
+            median: aspects[Math.floor(aspects.length / 2)],
+            mean: Math.exp(meanLog),
+            spread: Math.sqrt(variance),
+        };
+
+        this.aspectProfiles.set(cacheKey, profile);
+        return profile;
+    }
+
+    _primeMediaMeasurements(files) {
+        return Promise.all(files.map((media) => this._measureMedia(media))).then(() => {
+            this.aspectProfiles.clear();
+        });
     }
 
     _measureMedia(media) {
@@ -544,6 +596,7 @@ class MediaGrid {
             (metadata) => {
                 this.mediaMetrics.set(cacheKey, metadata);
                 this.mediaDimensions.delete(cacheKey);
+                this.aspectProfiles.clear();
                 return metadata;
             }
         );
@@ -903,7 +956,7 @@ async function loadFolder() {
 
     folderPathEl.textContent = folderPath;
 
-    grid.setMedia(files);
+    await grid.setMedia(files);
 
     if (grid.countMediaForFilter() === 0) {
         setActiveToggle(mediaFilterButtons, (button) => button.dataset.mediaFilter === "mixed");
