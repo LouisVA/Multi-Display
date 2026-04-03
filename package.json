@@ -1,0 +1,36 @@
+{
+  "name": "multi-display",
+  "version": "1.0.0",
+  "description": "Display multiple videos and images simultaneously from a folder",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.multi-display.app",
+    "productName": "Multi-Display",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "devDependencies": {
+    "electron": "^41.1.1",
+    "electron-builder": "^26.8.1"
+  }
+}
