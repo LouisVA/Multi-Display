@@ -1,131 +1,133 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' file: data: blob:; media-src 'self' file: data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline';"
-    />
-    <title>Multi-Display</title>
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <div id="app">
+    <head>
+        <meta charset="UTF-8" />
+        <meta
+            http-equiv="Content-Security-Policy"
+            content="default-src 'self'; img-src 'self' file: data: blob:; media-src 'self' file: data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline';"
+        />
+        <title>Multi-Display</title>
+        <link rel="stylesheet" href="styles.css" />
+    </head>
+    <body>
+        <div id="app">
+            <!-- ── Empty / Welcome state ─────────────────────────────────── -->
+            <div id="empty-state">
+                <div class="welcome-icon">🖼️</div>
+                <h1>Multi-Display</h1>
+                <p>Display photos &amp; videos simultaneously in a beautiful grid</p>
+                <button id="load-folder-btn" class="primary-btn">📂 Open Media Folder</button>
+            </div>
 
-      <!-- ── Empty / Welcome state ─────────────────────────────────── -->
-      <div id="empty-state">
-        <div class="welcome-icon">🖼️</div>
-        <h1>Multi-Display</h1>
-        <p>Display photos &amp; videos simultaneously in a beautiful grid</p>
-        <button id="load-folder-btn" class="primary-btn">
-          📂 Open Media Folder
-        </button>
-      </div>
+            <!-- ── Media grid ─────────────────────────────────────────────── -->
+            <div id="grid"></div>
 
-      <!-- ── Media grid ─────────────────────────────────────────────── -->
-      <div id="grid"></div>
+            <!-- ── Settings toggle (gear icon) ───────────────────────────── -->
+            <button id="settings-toggle" title="Settings (S)">⚙</button>
 
-      <!-- ── Settings toggle (gear icon) ───────────────────────────── -->
-      <button id="settings-toggle" title="Settings (S)">⚙</button>
+            <!-- ── Settings panel ────────────────────────────────────────── -->
+            <div id="settings-panel">
+                <div class="settings-header">
+                    <h2>Settings</h2>
+                    <button id="settings-close" title="Close">✕</button>
+                </div>
 
-      <!-- ── Settings panel ────────────────────────────────────────── -->
-      <div id="settings-panel">
-        <div class="settings-header">
-          <h2>Settings</h2>
-          <button id="settings-close" title="Close">✕</button>
+                <!-- Folder -->
+                <div class="settings-section">
+                    <button id="load-folder-settings" class="primary-btn full-width">📂 Open Folder</button>
+                    <p id="folder-path" class="folder-path"></p>
+                </div>
+
+                <!-- Grid mode -->
+                <div class="settings-section">
+                    <label class="settings-label">Grid Mode</label>
+                    <div class="toggle-group">
+                        <button class="toggle-btn active" data-mode="uniform">Uniform</button>
+                        <button class="toggle-btn" data-mode="masonry">Masonry</button>
+                        <button class="toggle-btn" data-mode="smart-masonry">Smart</button>
+                    </div>
+                    <p class="setting-note">Smart masonry sizes each tile from the image or video aspect ratio.</p>
+                </div>
+
+                <div class="settings-section">
+                    <label class="settings-label">Refresh Layout</label>
+                    <div class="toggle-group">
+                        <button class="toggle-btn active" data-redraw="off">Keep Grid</button>
+                        <button class="toggle-btn" data-redraw="on">Redraw Grid</button>
+                    </div>
+                    <p class="setting-note">Redraw Grid recalculates masonry placement whenever a tile refreshes.</p>
+                </div>
+
+                <div class="settings-section">
+                    <label class="settings-label">Media Source</label>
+                    <div class="toggle-group">
+                        <button class="toggle-btn active" data-media-filter="mixed">Mixed</button>
+                        <button class="toggle-btn" data-media-filter="image">Images</button>
+                        <button class="toggle-btn" data-media-filter="video">Videos</button>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <label class="settings-label">Media Fit</label>
+                    <div class="toggle-group">
+                        <button class="toggle-btn active" data-fit-mode="crop">Crop</button>
+                        <button class="toggle-btn" data-fit-mode="fit">Fit</button>
+                    </div>
+                    <p class="setting-note">Crop fills each tile. Fit keeps the full image or video visible.</p>
+                </div>
+
+                <!-- Visible slots -->
+                <div class="settings-section" id="slots-section">
+                    <label class="settings-label">
+                        Visible Slots <span id="slots-value" class="setting-value">12</span>
+                    </label>
+                    <input type="range" id="slots-slider" class="slider" min="1" max="48" value="12" />
+                </div>
+
+                <!-- Image rotation time -->
+                <div class="settings-section">
+                    <label class="settings-label">
+                        Image Display Time
+                        <span id="image-time-value" class="setting-value">10 s</span>
+                    </label>
+                    <input type="range" id="image-time-slider" class="slider" min="3" max="120" value="10" />
+                </div>
+
+                <!-- Video behavior -->
+                <div class="settings-section">
+                    <label class="settings-label">Video Behavior</label>
+                    <div class="toggle-group">
+                        <button class="toggle-btn active" data-video="loop">Loop</button>
+                        <button class="toggle-btn" data-video="rotate">Rotate</button>
+                    </div>
+                </div>
+
+                <!-- Gap -->
+                <div class="settings-section">
+                    <label class="settings-label">
+                        Cell Gap <span id="gap-value" class="setting-value">2 px</span>
+                    </label>
+                    <input type="range" id="gap-slider" class="slider" min="0" max="24" value="2" />
+                </div>
+
+                <!-- Playback -->
+                <div class="settings-section">
+                    <button id="pause-btn" class="secondary-btn full-width">⏸ Pause All</button>
+                </div>
+
+                <!-- Fullscreen -->
+                <div class="settings-section">
+                    <button id="fullscreen-btn" class="secondary-btn full-width">⛶ Toggle Fullscreen</button>
+                </div>
+
+                <p class="hint">
+                    Keyboard: <kbd>S</kbd> settings &nbsp;·&nbsp; <kbd>Space</kbd> pause &nbsp;·&nbsp;
+                    <kbd>F</kbd> fullscreen
+                </p>
+            </div>
         </div>
+        <!-- #app -->
 
-        <!-- Folder -->
-        <div class="settings-section">
-          <button id="load-folder-settings" class="primary-btn full-width">
-            📂 Open Folder
-          </button>
-          <p id="folder-path" class="folder-path"></p>
-        </div>
-
-        <!-- Grid mode -->
-        <div class="settings-section">
-          <label class="settings-label">Grid Mode</label>
-          <div class="toggle-group">
-            <button class="toggle-btn active" data-mode="uniform">Uniform</button>
-            <button class="toggle-btn" data-mode="masonry">Masonry</button>
-          </div>
-        </div>
-
-        <!-- Columns (uniform only) -->
-        <div class="settings-section" id="columns-section">
-          <label class="settings-label">
-            Columns <span id="columns-value" class="setting-value">3</span>
-          </label>
-          <input
-            type="range"
-            id="columns-slider"
-            class="slider"
-            min="2"
-            max="8"
-            value="3"
-          />
-        </div>
-
-        <!-- Image rotation time -->
-        <div class="settings-section">
-          <label class="settings-label">
-            Image Display Time
-            <span id="image-time-value" class="setting-value">10 s</span>
-          </label>
-          <input
-            type="range"
-            id="image-time-slider"
-            class="slider"
-            min="3"
-            max="120"
-            value="10"
-          />
-        </div>
-
-        <!-- Video behavior -->
-        <div class="settings-section">
-          <label class="settings-label">Video Behavior</label>
-          <div class="toggle-group">
-            <button class="toggle-btn active" data-video="loop">Loop</button>
-            <button class="toggle-btn" data-video="rotate">Rotate</button>
-          </div>
-        </div>
-
-        <!-- Gap -->
-        <div class="settings-section">
-          <label class="settings-label">
-            Cell Gap <span id="gap-value" class="setting-value">2 px</span>
-          </label>
-          <input
-            type="range"
-            id="gap-slider"
-            class="slider"
-            min="0"
-            max="24"
-            value="2"
-          />
-        </div>
-
-        <!-- Playback -->
-        <div class="settings-section">
-          <button id="pause-btn" class="secondary-btn full-width">
-            ⏸ Pause All
-          </button>
-        </div>
-
-        <!-- Fullscreen -->
-        <div class="settings-section">
-          <button id="fullscreen-btn" class="secondary-btn full-width">
-            ⛶ Toggle Fullscreen
-          </button>
-        </div>
-
-        <p class="hint">Keyboard: <kbd>S</kbd> settings &nbsp;·&nbsp; <kbd>Space</kbd> pause &nbsp;·&nbsp; <kbd>F</kbd> fullscreen</p>
-      </div>
-
-    </div><!-- #app -->
-
-    <script src="renderer.js"></script>
-  </body>
+        <script src="renderer.js"></script>
+    </body>
 </html>
