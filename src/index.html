@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; media-src 'self' local-media:; img-src 'self' local-media: data:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi Display</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ===== TOP BAR ===== -->
+  <header class="topbar">
+    <span class="app-title">Multi Display</span>
+    <div class="topbar-controls">
+      <button id="btn-open-folder" class="btn btn-primary">📂 Open Folder</button>
+      <button id="btn-settings" class="btn btn-secondary">⚙ Settings</button>
+      <button id="btn-fullscreen" class="btn btn-secondary">⛶ Fullscreen</button>
+    </div>
+  </header>
+
+  <!-- ===== SETTINGS PANEL ===== -->
+  <aside id="settings-panel" class="settings-panel hidden" aria-label="Settings">
+    <h2>Settings</h2>
+
+    <section class="setting-group">
+      <h3>Grid Layout</h3>
+      <label class="radio-label">
+        <input type="radio" name="grid-type" value="uniform" checked />
+        Uniform grid (equal tiles)
+      </label>
+      <label class="radio-label">
+        <input type="radio" name="grid-type" value="random" />
+        Random-sized tiles
+      </label>
+      <label class="setting-row" id="uniform-cols-row">
+        <span>Columns</span>
+        <input type="number" id="grid-cols" min="1" max="12" value="3" />
+      </label>
+    </section>
+
+    <section class="setting-group">
+      <h3>Image Rotation</h3>
+      <label class="setting-row">
+        <span>Rotation interval (seconds)</span>
+        <input type="number" id="image-rotation-interval" min="1" max="3600" value="10" />
+      </label>
+      <label class="radio-label">
+        <input type="checkbox" id="image-rotation-enabled" checked />
+        Enable image rotation
+      </label>
+    </section>
+
+    <section class="setting-group">
+      <h3>Video Behavior</h3>
+      <label class="radio-label">
+        <input type="radio" name="video-mode" value="loop" checked />
+        Loop videos
+      </label>
+      <label class="radio-label">
+        <input type="radio" name="video-mode" value="rotate" />
+        Rotate to next video when finished
+      </label>
+    </section>
+
+    <section class="setting-group">
+      <h3>Folder</h3>
+      <label class="radio-label">
+        <input type="checkbox" id="recursive-scan" />
+        Scan sub-folders
+      </label>
+    </section>
+
+    <section class="setting-group">
+      <h3>Display</h3>
+      <label class="setting-row">
+        <span>Max items shown</span>
+        <input type="number" id="max-items" min="1" max="100" value="12" />
+      </label>
+      <button id="btn-reshuffle" class="btn btn-secondary full-width">🔀 Reshuffle</button>
+    </section>
+
+    <button id="btn-close-settings" class="btn btn-secondary full-width mt-8">✕ Close</button>
+  </aside>
+
+  <!-- ===== EMPTY STATE ===== -->
+  <div id="empty-state" class="empty-state">
+    <div class="empty-icon">🖼️</div>
+    <h2>No folder selected</h2>
+    <p>Click <strong>Open Folder</strong> to choose a folder containing photos and videos.</p>
+    <button id="btn-open-folder-empty" class="btn btn-primary btn-large">📂 Open Folder</button>
+  </div>
+
+  <!-- ===== MEDIA GRID ===== -->
+  <main id="media-grid" class="media-grid hidden"></main>
+
+  <!-- ===== STATUS BAR ===== -->
+  <footer id="status-bar" class="status-bar hidden">
+    <span id="status-text">0 items</span>
+    <span id="folder-path"></span>
+  </footer>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

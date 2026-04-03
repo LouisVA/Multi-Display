@@ -1,0 +1,60 @@
+{
+  "name": "multi-display",
+  "version": "1.0.0",
+  "description": "Display multiple videos and images at the same time from a folder.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LouisVA/Multi-Display.git"
+  },
+  "keywords": ["media", "display", "photos", "videos", "grid"],
+  "author": "LouisVA",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/LouisVA/Multi-Display/issues"
+  },
+  "homepage": "https://github.com/LouisVA/Multi-Display#readme",
+  "devDependencies": {
+    "electron": "^41.1.1",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.louisva.multi-display",
+    "productName": "Multi Display",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "icon": "src/assets/icon.ico"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "src/assets/icon.icns"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "src/assets/icon.png",
+      "category": "Utility"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
