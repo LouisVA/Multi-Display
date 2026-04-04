@@ -442,13 +442,13 @@ class MediaGrid {
 
     _rectAspect(rect, columns = this.masonryColumns, rows = this.masonryRows) {
         const gap = this.settings.gap;
-        const w = this.gridEl.clientWidth || window.innerWidth;
-        const h = this.gridEl.clientHeight || window.innerHeight;
-        const cellW = (w - gap * (columns - 1)) / Math.max(columns, 1);
-        const cellH = (h - gap * (rows - 1)) / Math.max(rows, 1);
-        const rectW = cellW * rect.w + gap * Math.max(rect.w - 1, 0);
-        const rectH = cellH * rect.h + gap * Math.max(rect.h - 1, 0);
-        return rectW / Math.max(rectH, 1);
+        const viewportWidth = this.gridEl.clientWidth || window.innerWidth;
+        const viewportHeight = this.gridEl.clientHeight || window.innerHeight;
+        const cellWidth = (viewportWidth - gap * (columns - 1)) / Math.max(columns, 1);
+        const cellHeight = (viewportHeight - gap * (rows - 1)) / Math.max(rows, 1);
+        const rectWidth = cellWidth * rect.w + gap * Math.max(rect.w - 1, 0);
+        const rectHeight = cellHeight * rect.h + gap * Math.max(rect.h - 1, 0);
+        return rectWidth / Math.max(rectHeight, 1);
     }
 
     _meanAspect(descriptors) {
