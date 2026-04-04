@@ -313,7 +313,7 @@ class MediaGrid {
 
             item.cell.style.gridColumn = `${placement.x} / span ${placement.w}`;
             item.cell.style.gridRow = `${placement.y} / span ${placement.h}`;
-            item.targetAspect = placement.w / Math.max(placement.h, 1);
+            item.targetAspect = this._rectAspect(placement);
         }
     }
 
@@ -331,9 +331,7 @@ class MediaGrid {
 
     _matchPlacementsToDescriptors(descriptors, placements) {
         const sortedDescriptors = [...descriptors].sort((a, b) => a.aspect - b.aspect || a.index - b.index);
-        const sortedPlacements = [...placements].sort(
-            (a, b) => a.w / Math.max(a.h, 1) - b.w / Math.max(b.h, 1)
-        );
+        const sortedPlacements = [...placements].sort((a, b) => this._rectAspect(a) - this._rectAspect(b));
 
         return sortedDescriptors.map((descriptor, index) => ({
             ...sortedPlacements[index],
@@ -437,9 +435,20 @@ class MediaGrid {
     }
 
     _slenderPenalty(rect) {
-        const aspect = rect.w / Math.max(rect.h, 1);
+        const aspect = this._rectAspect(rect);
         const inverse = 1 / Math.max(aspect, 0.001);
         return Math.max(0, aspect - 2.4) * 0.9 + Math.max(0, inverse - 2.4) * 0.9;
+    }
+
+    _rectAspect(rect, columns = this.masonryColumns, rows = this.masonryRows) {
+        const gap = this.settings.gap;
+        const w = this.gridEl.clientWidth || window.innerWidth;
+        const h = this.gridEl.clientHeight || window.innerHeight;
+        const cellW = (w - gap * (columns - 1)) / Math.max(columns, 1);
+        const cellH = (h - gap * (rows - 1)) / Math.max(rows, 1);
+        const rectW = cellW * rect.w + gap * Math.max(rect.w - 1, 0);
+        const rectH = cellH * rect.h + gap * Math.max(rect.h - 1, 0);
+        return rectW / Math.max(rectH, 1);
     }
 
     _meanAspect(descriptors) {
@@ -464,7 +473,7 @@ class MediaGrid {
     }
 
     _groupCropPenalty(rect, descriptors) {
-        const rectAspect = rect.w / Math.max(rect.h, 1);
+        const rectAspect = this._rectAspect(rect);
         let worst = 0;
         const total = descriptors.reduce((sum, descriptor) => {
             const penalty = this._coverCropPenalty(rectAspect, descriptor.aspect);
