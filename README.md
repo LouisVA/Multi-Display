@@ -17,3 +17,6 @@ The settings panel also includes:
 - Keep Grid or Redraw Grid on refresh for masonry modes.
 - Mixed, Images, or Videos filtering for the current folder.
 - Crop or Fit rendering, depending on whether filling the tile or preserving the full media matters more.
+
+
+Run using: npx electron .
