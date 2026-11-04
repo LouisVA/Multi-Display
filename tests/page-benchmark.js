@@ -1,4 +1,4 @@
-async function runPerformanceSuite(folder, repetitions) {
+async function runPerformanceSuite(folder, repetitions, emptyFolder) {
     const assert = (condition, message) => { if (!condition) throw new Error(message); };
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const until = async (condition, message) => {
@@ -178,6 +178,175 @@ async function runPerformanceSuite(folder, repetitions) {
         return { warmProbes: 0, changedFileProbes: 1, cacheLimit: 2 };
     });
 
+    await check('grid-interactions-and-saved-layouts', async () => {
+        const waitFor = (condition, message) => until(condition, message);
+        const answerDialog = async (promise, buttonId) => {
+            await waitFor(() => !document.getElementById('decision-dialog').hidden, 'The decision dialog did not open');
+            document.getElementById(buttonId).click();
+            return promise;
+        };
+        const setGap = (value) => {
+            const slider = document.getElementById('gap-slider');
+            slider.value = String(value);
+            slider.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        const clickPresetSave = async (title) => {
+            document.getElementById('preset-name').value = title;
+            const previous = persistenceController.presets.length;
+            document.getElementById('save-new-preset').click();
+            await waitFor(() => persistenceController.presets.length === previous + 1, `Preset ${title} was not saved`);
+            const preset = persistenceController.presets.find((item) => item.title === title);
+            assert(preset && Number.isFinite(Date.parse(preset.createdAt)), 'A named preset must have a saved timestamp');
+            return preset;
+        };
+        const fileKey = (media) => media?.path || media?.url;
+        const allFiles = files;
+        const controller = persistenceController;
+        controller.folderPath = folder;
+        controller.files = allFiles;
+        controller.selectedPresetId = null;
+        controller.dirty = false;
+        grid.stop();
+        grid.updateSettings({ gridMode: 'uniform', slotCount: 8, imageTime: 120, videoBehavior: 'rotate', mediaFilter: 'mixed', gap: 2 });
+        await grid.setMedia(allFiles);
+        // Put the video in the first cell so lock, filter, and loop checks are repeatable.
+        grid.pool = [video];
+        grid.start();
+        assert(grid.displayedItems.length === 8, 'The interaction grid must contain eight cells');
+        assert(new Set(grid.displayedItems.map((item) => fileKey(item.media))).size === 8, 'Visible media must be unique when enough eligible files exist');
+
+        const videoItem = grid.displayedItems[0];
+        videoItem.cell.click();
+        assert(videoItem.locked && videoItem.timer === null && videoItem.mediaEl.loop, 'Clicking a video must lock it and keep it looping');
+        grid.reshufflePool();
+        assert(!grid.pool.some((media) => fileKey(media) === fileKey(video)), 'A pinned file must not return to the replacement pool');
+
+        const left = grid.displayedItems[1];
+        const right = grid.displayedItems[2];
+        const leftMedia = left.media;
+        const rightMedia = right.media;
+        const transfer = new DataTransfer();
+        left.cell.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }));
+        const drop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer });
+        right.cell.dispatchEvent(drop);
+        assert(drop.defaultPrevented && left.media === rightMedia && right.media === leftMedia, 'Dragging a tile onto another must swap their media');
+        assert(left.mediaEl.parentElement === left.cell && right.mediaEl.parentElement === right.cell, 'Swapped media elements must stay inside their destination cells');
+
+        document.querySelector('[data-media-filter="image"]').click();
+        assert(grid.displayedItems[0].locked && fileKey(grid.displayedItems[0].media) === fileKey(video), 'An image filter must retain a pinned video');
+        assert(grid.displayedItems.slice(1).every((item) => item.media?.type === 'image'), 'A media filter must apply to unlocked cells');
+        document.querySelector('[data-media-filter="mixed"]').click();
+
+        // Ignore a visible tile while playback is paused, then restore it from the real gallery.
+        document.getElementById('pause-btn').click();
+        const ignoredItem = grid.displayedItems[3];
+        const ignoredKey = fileKey(ignoredItem.media);
+        const contextMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        ignoredItem.cell.dispatchEvent(contextMenu);
+        assert(contextMenu.defaultPrevented && grid.ignoredMedia.has(ignoredKey), 'Right-click must ignore the selected media');
+        await wait(650);
+        assert(!grid.displayedItems.some((item) => fileKey(item.media) === ignoredKey), 'Ignoring media must remove its visible copies while paused');
+        if (document.getElementById('ignored-gallery').hidden) document.getElementById('restore-ignored').click();
+        document.getElementById('restore-ignored').click();
+        const restoreButton = document.querySelector('#ignored-gallery button');
+        assert(restoreButton, 'The ignored gallery must show a Restore action');
+        restoreButton.click();
+        assert(!grid.ignoredMedia.has(ignoredKey) && grid.countMediaForFilter() === allFiles.length, 'Restoring media must return it to the eligible set');
+        document.getElementById('pause-btn').click();
+
+        // Save a pinned uniform layout, then check its dimensions after a container resize.
+        const uniformState = grid.exportState();
+        assert(uniformState.geometry.length === 8 && uniformState.grid.columns > 0 && uniformState.grid.rows > 0, 'A saved uniform layout must include its geometry and grid dimensions');
+        assert(uniformState.geometry.every((tile) => [tile.x, tile.y, tile.w, tile.h].every(Number.isFinite)), 'Saved geometry must use numeric positions and spans');
+        controller.folderPath = folder;
+        controller.files = allFiles;
+        controller.presets = await window.mediaAPI.listPresets(folder);
+        controller.selectedPresetId = null;
+        controller.dirty = false;
+        document.getElementById('save-new-preset').disabled = false;
+        const runId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+        const uniformPreset = await clickPresetSave(`Issue 5 uniform ${runId}`);
+        const originalUniformGrid = { ...uniformState.grid };
+        const originalWidth = gridEl.style.width;
+        gridEl.style.width = `${Math.max(320, gridEl.clientWidth - 120)}px`;
+        window.dispatchEvent(new Event('resize'));
+        await wait(300);
+        assert(grid.frozenGrid.columns === originalUniformGrid.columns && grid.frozenGrid.rows === originalUniformGrid.rows, 'A viewport resize must preserve saved uniform grid dimensions');
+        gridEl.style.width = originalWidth;
+        window.dispatchEvent(new Event('resize'));
+
+        // All three leave choices must work. Save opens a second choice when a preset is selected.
+        setGap(5);
+        const cancelLeave = controller.confirmLeave('leave');
+        assert(await answerDialog(cancelLeave, 'decision-cancel') === false, 'Cancel must keep the current layout open');
+        const discardLeave = controller.confirmLeave('leave');
+        assert(await answerDialog(discardLeave, 'decision-discard') === true, 'Discard must allow the requested action');
+        setGap(4);
+        const saveLeave = controller.confirmLeave('leave');
+        await waitFor(() => !document.getElementById('decision-dialog').hidden, 'The Save prompt did not open');
+        document.getElementById('decision-save').click();
+        await waitFor(() => !document.getElementById('decision-dialog').hidden, 'Save must ask whether to create or overwrite a preset');
+        const saveCount = controller.presets.length;
+        document.getElementById('decision-save').click();
+        assert(await saveLeave === true, 'Save must complete the requested action');
+        await waitFor(() => controller.presets.length === saveCount + 1, 'Save from the leave prompt must create a preset');
+
+        // Change to masonry through the real control. Preserve a second named preset and its dimensions.
+        document.querySelector('[data-mode="masonry"]').click();
+        await answerDialog(new Promise((resolve) => {
+            const poll = setInterval(() => {
+                if (grid.settings.gridMode === 'masonry') { clearInterval(poll); resolve(true); }
+            }, 5);
+        }), 'decision-save');
+        await waitFor(() => grid.displayedItems.every((item) => item.cell.style.gridColumn && item.cell.style.gridRow), 'Masonry geometry did not finish');
+        const masonryState = grid.exportState();
+        const masonryPreset = await clickPresetSave(`Issue 5 masonry ${runId}`);
+        assert(masonryState.grid.columns > 0 && masonryState.grid.rows > 0, 'A saved masonry preset must include its grid dimensions');
+        const beforeOverwrite = (await window.mediaAPI.listPresets(folder)).find((item) => item.id === masonryPreset.id);
+        setGap(6);
+        document.getElementById('overwrite-preset').click();
+        await waitFor(() => !controller.dirty && !document.getElementById('overwrite-preset').disabled, 'Overwrite did not finish');
+        const overwritten = (await window.mediaAPI.listPresets(folder)).find((item) => item.id === masonryPreset.id);
+        assert(overwritten && overwritten.updatedAt >= beforeOverwrite.updatedAt && overwritten.snapshot.settings.gap === 6, 'Overwrite must update the selected preset on disk');
+        controller.selectedPresetId = uniformPreset.id;
+        assert(await controller.loadPreset(uniformPreset.id), 'The saved uniform preset must load through the persistence controller');
+        assert(grid.settings.gridMode === 'uniform' && grid.displayedItems[0].locked && fileKey(grid.displayedItems[0].media) === fileKey(video), 'Loading a preset must restore its pinned video and layout mode');
+
+        // A missing saved file must remain a named pin. The user can fill that slot and keep it locked.
+        const missingKey = `${folder}/missing-pinned-image.png`;
+        const missingState = structuredClone(uniformPreset.snapshot);
+        missingState.pins = [{ index: 0, mediaKey: missingKey }];
+        await grid.restoreState(missingState, allFiles);
+        const missingPin = grid.displayedItems[0];
+        assert(missingPin.locked && !missingPin.media && missingPin.missingMediaKey === missingKey, 'A missing pinned file must restore as an empty locked slot');
+        assert(grid.exportState().pins.some((pin) => pin.index === 0 && pin.mediaKey === missingKey), 'Re-saving a missing pin must keep its file key');
+        controller.files = allFiles;
+        controller.selectedPresetId = null;
+        const missingPreset = await clickPresetSave(`Issue 5 missing pin ${runId}`);
+        const persistedMissing = (await window.mediaAPI.listPresets(folder)).find((item) => item.id === missingPreset.id);
+        assert(persistedMissing.snapshot.pins[0].mediaKey === missingKey, 'The persisted missing pin must not have a null file key');
+        assert(await controller.loadPreset(missingPreset.id), 'The saved missing-pin preset must reload');
+        const missingCell = grid.displayedItems[0];
+        missingCell.cell.click();
+        assert(missingCell.locked && missingCell.media && fileKey(missingCell.media) !== missingKey, 'Clicking a missing pin must fill it with random media and keep it locked');
+        assert(grid.exportState().pins.every((pin) => typeof pin.mediaKey === 'string' && pin.mediaKey.length > 0), 'Filled pins must remain valid when re-saved');
+
+        // Save and load the same preset for a folder that now has no media files.
+        controller.folderPath = emptyFolder;
+        controller.files = allFiles;
+        controller.selectedPresetId = null;
+        const emptyPreset = await clickPresetSave(`Issue 5 empty folder ${runId}`);
+        assert(await controller.loadPreset(emptyPreset.id), 'A saved layout must load after its folder has no media files');
+        assert(controller.files.length === 0 && grid.displayedItems.length === emptyPreset.snapshot.settings.slotCount, 'An empty folder must retain the saved tile count');
+        assert(grid.displayedItems.some((item) => item.locked && !item.media && item.missingMediaKey), 'Missing folder media must remain an empty locked pin');
+
+        const emptyFolderTiles = grid.displayedItems.length;
+        grid.stop();
+        controller.dirty = false;
+        return { uniqueVisible: 8, presetsSaved: controller.presets.length, pinnedVideo: true, ignoredRestored: true, emptyFolderTiles };
+    });
+
+    assert(results.length === 7 * repetitions, `The complete suite must produce ${7 * repetitions} case runs`);
     grid.stop();
     grid.layoutWorker.dispose();
     grid.metadata.dispose();

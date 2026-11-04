@@ -38,6 +38,24 @@
                     <p id="folder-path" class="folder-path"></p>
                 </div>
 
+                <div class="settings-section preset-section">
+                    <label class="settings-label" for="preset-select">Saved layouts</label>
+                    <select id="preset-select" aria-label="Saved layouts">
+                        <option value="">Choose a saved layout</option>
+                    </select>
+                    <input id="preset-name" type="text" maxlength="80" placeholder="Optional layout title" aria-label="Optional layout title" />
+                    <div class="preset-actions">
+                        <button id="save-new-preset" class="secondary-btn">Save New</button>
+                        <button id="overwrite-preset" class="secondary-btn" disabled>Overwrite</button>
+                    </div>
+                    <p id="unsaved-indicator" class="unsaved-indicator" role="status" aria-live="polite">No unsaved changes</p>
+                </div>
+
+                <div class="settings-section">
+                    <button id="restore-ignored" class="secondary-btn full-width" aria-expanded="false" aria-controls="ignored-gallery">Show ignored media (0)</button>
+                    <div id="ignored-gallery" class="ignored-gallery" aria-live="polite" hidden></div>
+                </div>
+
                 <!-- Grid mode -->
                 <div class="settings-section">
                     <label class="settings-label">Grid Mode</label>
@@ -127,6 +145,18 @@
             </div>
         </div>
         <!-- #app -->
+
+        <div id="decision-dialog" class="dialog-backdrop" hidden>
+            <section class="decision-card" role="dialog" aria-modal="true" aria-labelledby="decision-title" aria-describedby="decision-message">
+                <h2 id="decision-title">Save changes?</h2>
+                <p id="decision-message">Save your layout before you leave?</p>
+                <div class="decision-actions">
+                    <button id="decision-save" class="primary-btn">Save</button>
+                    <button id="decision-discard" class="secondary-btn">Discard</button>
+                    <button id="decision-cancel" class="secondary-btn">Cancel</button>
+                </div>
+            </section>
+        </div>
 
         <script src="masonry-layout.js"></script>
         <script src="layout-worker-client.js"></script>

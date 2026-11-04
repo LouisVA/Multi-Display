@@ -40,6 +40,12 @@ class MediaGrid extends MasonryLayout {
         this.previousSmartScore = null;
         this.lastSmartLayoutDiagnostics = null;
         this.smartLayoutDebug = this._readSmartLayoutDebugFlag();
+        this.ignoredMedia = new Set();
+        this.reservedMediaKeys = new Set();
+        this.frozenGeometry = null;
+        this.frozenGrid = null;
+        this.pendingPins = null;
+        this.onChange = null;
 
         this.settings = {
             gridMode: "uniform", // 'uniform' | 'masonry' | 'smart-masonry'
@@ -60,28 +66,51 @@ class MediaGrid extends MasonryLayout {
     _filteredMediaFiles(filter = this.settings.mediaFilter) {
         if (!this.filteredMedia.has(filter)) {
             this.filteredMedia.set(filter, filter === "image" || filter === "video"
-                ? this.mediaFiles.filter((media) => media.type === filter)
-                : this.mediaFiles);
+                ? this.mediaFiles.filter((media) => media.type === filter && !this.ignoredMedia.has(this._mediaKey(media)))
+                : this.mediaFiles.filter((media) => !this.ignoredMedia.has(this._mediaKey(media))));
         }
         return this.filteredMedia.get(filter);
+    }
+
+    _mediaKey(media) {
+        return media?.path || media?.url || null;
+    }
+
+    _notifyChange(type, details = {}) {
+        if (typeof this.onChange === "function") {
+            this.onChange({ type, ...details });
+        }
     }
 
     countMediaForFilter(filter = this.settings.mediaFilter) {
         return this._filteredMediaFiles(filter).length;
     }
 
-    reshufflePool() {
-        this.pool = [...this._filteredMediaFiles()];
+    reshufflePool(excludeItem = null) {
+        const unavailable = new Set([
+            ...this.displayedItems.filter((item) => item !== excludeItem).map((item) => this._mediaKey(item.media)).filter(Boolean),
+            ...this.reservedMediaKeys,
+        ]);
+        this.pool = this._filteredMediaFiles().filter((media) => !unavailable.has(this._mediaKey(media)));
         for (let index = this.pool.length - 1; index > 0; index--) {
             const swap = Math.floor(Math.random() * (index + 1));
             [this.pool[index], this.pool[swap]] = [this.pool[swap], this.pool[index]];
         }
     }
 
-    getNextMedia(preferredAspect = null) {
+    getNextMedia(preferredAspect = null, replacingItem = null) {
         if (this._filteredMediaFiles().length === 0) return null;
-        if (this.pool.length === 0) this.reshufflePool();
-        if (this.pool.length === 0) return null;
+        if (this.pool.length === 0) this.reshufflePool(replacingItem);
+        if (this.pool.length === 0) {
+            const lockedKeys = new Set([
+                ...this.displayedItems.filter((item) => item.locked).map((item) => this._mediaKey(item.media)).filter(Boolean),
+                ...this.reservedMediaKeys,
+            ]);
+            const unlockedCount = Math.max(1, this.settings.slotCount - this.displayedItems.filter((item) => item.locked).length);
+            if (this._filteredMediaFiles().length >= unlockedCount) return null;
+            const repeatable = this._filteredMediaFiles().filter((media) => !lockedKeys.has(this._mediaKey(media)));
+            return repeatable.length ? repeatable[Math.floor(Math.random() * repeatable.length)] : null;
+        }
 
         if (!preferredAspect || !Number.isFinite(preferredAspect) || this.pool.length === 1) {
             return this.pool.pop();
@@ -117,6 +146,11 @@ class MediaGrid extends MasonryLayout {
         this.mediaMetrics.clear();
         this.aspectProfiles.clear();
         this.filteredMedia.clear();
+        this.ignoredMedia.clear();
+        this.reservedMediaKeys.clear();
+        this.frozenGeometry = null;
+        this.frozenGrid = null;
+        this.pendingPins = null;
         this.mediaFiles = files;
         this.reshufflePool();
     }
@@ -142,7 +176,7 @@ class MediaGrid extends MasonryLayout {
             if (item.transitionTimer) clearTimeout(item.transitionTimer);
             item.renderVersion += 1;
             this._removeVideoHandler(item);
-            this._releaseMediaEl(item.mediaEl);
+            if (item.mediaEl) this._releaseMediaEl(item.mediaEl);
         }
         this.displayedItems = [];
         this.previousSmartPlacements = null;
@@ -155,35 +189,65 @@ class MediaGrid extends MasonryLayout {
 
     buildGrid() {
         const buildVersion = ++this.layoutVersion;
+        const previousItems = this.displayedItems;
+        const pins = previousItems
+            .map((item, index) => item.locked
+                ? { index, media: item.media, mediaKey: this._mediaKey(item.media) || item.missingMediaKey }
+                : null)
+            .filter(Boolean);
+        const retainedPins = pins.length ? pins : this.pendingPins || [];
+        this.reservedMediaKeys = new Set(retainedPins.map((pin) => this._mediaKey(pin.media) || pin.mediaKey).filter(Boolean));
+        this.pendingPins = null;
+        const frozenGeometry = this.frozenGeometry;
         this._clearGrid();
-
-        if (this.countMediaForFilter() === 0) {
-            return;
-        }
 
         const { gridMode, gap, slotCount } = this.settings;
         const visibleSlots = Math.max(1, slotCount);
+        const pinKeys = new Set(retainedPins.map((pin) => this._mediaKey(pin.media) || pin.mediaKey).filter(Boolean));
+        this.pool = this.pool.filter((media) => !pinKeys.has(this._mediaKey(media)));
 
         this.gridEl.style.gap = `${gap}px`;
         this.gridEl.dataset.layout = gridMode;
         this.gridEl.dataset.fitMode = this.settings.fitMode;
         this.gridEl.style.gridAutoFlow = "row";
 
+        if (frozenGeometry?.length === visibleSlots && this.frozenGrid) {
+            this.gridEl.style.gridTemplateColumns = `repeat(${this.frozenGrid.columns}, minmax(0, 1fr))`;
+            this.gridEl.style.gridTemplateRows = `repeat(${this.frozenGrid.rows}, minmax(0, 1fr))`;
+            this.masonryColumns = this.frozenGrid.columns;
+            this.masonryRows = this.frozenGrid.rows;
+        }
+
         if (gridMode === "uniform") {
-            const { columns, rows } = this._uniformLayout(visibleSlots, gap);
+            const { columns, rows } = frozenGeometry?.length === visibleSlots && this.frozenGrid
+                ? this.frozenGrid
+                : this._uniformLayout(visibleSlots, gap);
             const targetAspect = this._cellAspect(columns, rows, gap);
             this.gridEl.style.gridAutoRows = "";
             this.gridEl.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
             this.gridEl.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
 
-            for (let i = 0; i < visibleSlots; i++) this._addCell(targetAspect);
+            for (let i = 0; i < visibleSlots; i++) {
+                const pin = retainedPins.find((entry) => entry.index === i);
+                this._addCell(targetAspect, pin?.media || null, Boolean(pin), pin?.mediaKey || null);
+            }
         } else {
-            const { columns, rows } = this._masonryGridDimensions(visibleSlots, gridMode);
+            const { columns, rows } = frozenGeometry?.length === visibleSlots && this.frozenGrid
+                ? this.frozenGrid
+                : this._masonryGridDimensions(visibleSlots, gridMode);
             this._applyMasonryGridDimensions(columns, rows);
 
-            for (let i = 0; i < visibleSlots; i++) this._addCell();
-            void this._refreshMasonryLayout(buildVersion, { reason: "build" });
+            for (let i = 0; i < visibleSlots; i++) {
+                const pin = retainedPins.find((entry) => entry.index === i);
+                this._addCell(1, pin?.media || null, Boolean(pin), pin?.mediaKey || null);
+            }
+            if (frozenGeometry?.length === visibleSlots) {
+                this._applyFrozenGeometry(frozenGeometry);
+            } else {
+                void this._refreshMasonryLayout(buildVersion, { reason: "build" });
+            }
         }
+        this.reservedMediaKeys.clear();
     }
 
     _cellAspect(columns, rows, gap) {
@@ -234,21 +298,22 @@ class MediaGrid extends MasonryLayout {
 
     // ── Cell / media element helpers ─────────────────────────────────────────
 
-    _addCell(targetAspect = 1) {
-        const media = this.getNextMedia(targetAspect);
-        if (!media) return;
+    _addCell(targetAspect = 1, assignedMedia = null, locked = false, missingMediaKey = null) {
+        const media = assignedMedia || (locked && missingMediaKey ? null : this.getNextMedia(targetAspect));
 
         const cell = document.createElement("div");
         cell.className = "grid-cell";
 
-        const mediaEl = this._createMediaEl(media);
-        cell.appendChild(mediaEl);
+        const mediaEl = media ? this._createMediaEl(media) : null;
+        if (mediaEl) cell.appendChild(mediaEl);
         this.gridEl.appendChild(cell);
 
         const item = {
             cell,
             mediaEl,
             media,
+            locked,
+            missingMediaKey: media ? null : missingMediaKey,
             timer: null,
             transitionTimer: null,
             renderVersion: 0,
@@ -256,13 +321,15 @@ class MediaGrid extends MasonryLayout {
             layoutSeed: Math.random(),
             targetAspect,
         };
+        if (locked && media?.type === "video" && mediaEl) mediaEl.loop = true;
         this.displayedItems.push(item);
-        this._scheduleRotation(item);
+        if (media) this._scheduleRotation(item);
     }
 
     async _refreshMasonryLayout(buildVersion = this.layoutVersion, options = {}) {
         const { gridMode } = this.settings;
         if (gridMode === "uniform") return;
+        if (this.frozenGeometry?.length === this.displayedItems.length) return;
         const layoutToken = ++this.masonryLayoutToken;
         this.layoutWorker.cancel();
         const reason = options.reason || "refresh";
@@ -273,14 +340,14 @@ class MediaGrid extends MasonryLayout {
         if (gridMode === "smart-masonry") {
             descriptors = await Promise.all(
                 this.displayedItems.map(async (item, index) => {
-                    const metadata = await this._measureMedia(item.media);
+                    const metadata = item.media ? await this._measureMedia(item.media) : { aspect: 1 };
                     return { index, aspect: metadata.aspect, item };
                 })
             );
         } else {
             descriptors = this.displayedItems.map((item, index) => ({
                 index,
-                aspect: this._masonryAspectFromSeed(item.layoutSeed, item.media.type),
+                aspect: this._masonryAspectFromSeed(item.layoutSeed, item.media?.type || "image"),
                 item,
             }));
         }
@@ -363,6 +430,13 @@ class MediaGrid extends MasonryLayout {
             item.cell.style.gridRow = `${placement.y} / span ${placement.h}`;
             item.targetAspect = this._rectAspect(placement, layoutColumns, layoutRows);
         }
+        this.reservedMediaKeys.clear();
+        this.layoutGeometry = this.displayedItems.map((item) => ({
+            x: Number(item.cell.style.gridColumn.split(" /")[0]) || 1,
+            y: Number(item.cell.style.gridRow.split(" /")[0]) || 1,
+            w: Number(item.cell.style.gridColumn.match(/span\s+(\d+)/)?.[1]) || 1,
+            h: Number(item.cell.style.gridRow.match(/span\s+(\d+)/)?.[1]) || 1,
+        }));
 
         if (gridMode === "smart-masonry") {
             this.previousSmartPlacements = new Map(
@@ -523,16 +597,16 @@ class MediaGrid extends MasonryLayout {
     }
 
     _removeVideoHandler(item) {
-        if (item.videoEndHandler) {
+        if (item.videoEndHandler && item.mediaEl) {
             item.mediaEl.removeEventListener("ended", item.videoEndHandler);
-            item.videoEndHandler = null;
         }
+        item.videoEndHandler = null;
     }
 
     // ── Rotation scheduling ──────────────────────────────────────────────────
 
     _scheduleRotation(item) {
-        if (!this.running || !item.cell.isConnected || this.paused) return;
+        if (!this.running || !item.cell.isConnected || this.paused || item.locked || !item.media || !item.mediaEl) return;
 
         this._removeVideoHandler(item);
 
@@ -553,22 +627,35 @@ class MediaGrid extends MasonryLayout {
         }
     }
 
-    _replaceItem(item) {
-        if (!this.running || this.paused) return;
+    _replaceItem(item, options = {}) {
+        if (!this.running || (this.paused && !options.allowPaused) || (item.locked && !options.allowLocked)) return;
         if (item.timer) {
             clearTimeout(item.timer);
             item.timer = null;
         }
         this._removeVideoHandler(item);
 
-        const newMedia = this.getNextMedia(item.targetAspect);
-        if (!newMedia) return;
+        const newMedia = this.getNextMedia(item.targetAspect, item);
+        if (!newMedia) {
+            if (options.clearWhenUnavailable) {
+                if (item.transitionTimer) clearTimeout(item.transitionTimer);
+                item.transitionTimer = null;
+                item.renderVersion += 1;
+                if (item.mediaEl) {
+                    this._releaseMediaEl(item.mediaEl);
+                    item.mediaEl.remove();
+                }
+                item.mediaEl = null;
+                item.media = null;
+            }
+            return;
+        }
 
         const renderVersion = item.renderVersion + 1;
         item.renderVersion = renderVersion;
 
         // Fade out
-        item.mediaEl.classList.add("fade-out");
+        if (item.mediaEl) item.mediaEl.classList.add("fade-out");
 
         if (item.transitionTimer) clearTimeout(item.transitionTimer);
         item.transitionTimer = setTimeout(() => {
@@ -583,11 +670,14 @@ class MediaGrid extends MasonryLayout {
             // Start invisible, then fade in
             newEl.style.opacity = "0";
             item.cell.appendChild(newEl);
-            this._releaseMediaEl(oldEl);
-            oldEl.remove();
+            if (oldEl) {
+                this._releaseMediaEl(oldEl);
+                oldEl.remove();
+            }
 
             item.mediaEl = newEl;
             item.media = newMedia;
+            item.missingMediaKey = null;
             if (this.settings.redrawOnRefresh && this.settings.gridMode !== "uniform") {
                 void this._refreshMasonryLayout(this.layoutVersion, {
                     reason: "refresh",
@@ -620,7 +710,7 @@ class MediaGrid extends MasonryLayout {
 
         if (this.paused) {
             for (const item of this.displayedItems) {
-                if (item.media.type === "video") item.mediaEl.pause();
+                if (item.media?.type === "video" && item.mediaEl) item.mediaEl.pause();
                 this._removeVideoHandler(item);
                 if (item.timer) {
                     clearTimeout(item.timer);
@@ -629,7 +719,7 @@ class MediaGrid extends MasonryLayout {
             }
         } else {
             for (const item of this.displayedItems) {
-                if (item.media.type === "video") item.mediaEl.play().catch(() => {});
+                if (item.media?.type === "video" && item.mediaEl) item.mediaEl.play().catch(() => {});
                 this._scheduleRotation(item);
             }
         }
@@ -649,8 +739,8 @@ class MediaGrid extends MasonryLayout {
         // Toggle video loop without full rebuild
         if ("videoBehavior" in changes) {
             for (const item of this.displayedItems) {
-                if (item.media.type === "video") {
-                    item.mediaEl.loop = changes.videoBehavior === "loop";
+                if (item.media?.type === "video" && item.mediaEl) {
+                    item.mediaEl.loop = item.locked || changes.videoBehavior === "loop";
                     if (!this.paused) this._scheduleRotation(item);
                 }
             }
@@ -659,7 +749,7 @@ class MediaGrid extends MasonryLayout {
         // Reset image timers when imageTime changes
         if ("imageTime" in changes) {
             for (const item of this.displayedItems) {
-                if (item.media.type === "image") {
+                if (item.media?.type === "image" && !item.locked) {
                     if (item.timer) clearTimeout(item.timer);
                     item.timer = setTimeout(() => this._replaceItem(item), this.settings.imageTime * 1000);
                 }
@@ -669,9 +759,234 @@ class MediaGrid extends MasonryLayout {
         // Rebuild grid for layout-affecting changes
         const layoutKeys = ["gridMode", "slotCount", "gap", "mediaFilter"];
         if (this.running && layoutKeys.some((k) => k in changes && prev[k] !== changes[k])) {
+            if (("gridMode" in changes && prev.gridMode !== changes.gridMode) || ("slotCount" in changes && prev.slotCount !== changes.slotCount)) {
+                this.clearLocks();
+            }
             this.reshufflePool();
             this.buildGrid();
         }
+    }
+
+    _resolveItem(itemOrIndex) {
+        return Number.isInteger(itemOrIndex) ? this.displayedItems[itemOrIndex] : itemOrIndex;
+    }
+
+    _applyFrozenGeometry(geometry = this.frozenGeometry) {
+        if (!Array.isArray(geometry)) return;
+        for (let index = 0; index < Math.min(geometry.length, this.displayedItems.length); index++) {
+            const item = this.displayedItems[index];
+            const placement = geometry[index];
+            item.cell.style.gridColumn = `${placement.x} / span ${placement.w}`;
+            item.cell.style.gridRow = `${placement.y} / span ${placement.h}`;
+        }
+        this.layoutGeometry = geometry.map((placement) => ({ ...placement }));
+    }
+
+    freezeLayout() {
+        this.masonryLayoutToken += 1;
+        this.layoutWorker.cancel();
+        if (this.settings.gridMode === "uniform") {
+            const { columns, rows } = this.frozenGrid || this._uniformLayout(this.displayedItems.length, this.settings.gap);
+            this.frozenGrid = { columns, rows };
+        } else {
+            this.frozenGrid = { columns: this.masonryColumns, rows: this.masonryRows };
+        }
+        let current = this.displayedItems.map((item) => {
+            const col = item.cell.style.gridColumn.match(/^(\d+)\s*\/\s*span\s*(\d+)/);
+            const row = item.cell.style.gridRow.match(/^(\d+)\s*\/\s*span\s*(\d+)/);
+            return col && row ? { x: Number(col[1]), y: Number(row[1]), w: Number(col[2]), h: Number(row[2]) } : null;
+        });
+        if (this.settings.gridMode === "uniform") {
+            current = this.displayedItems.map((item, index) => ({
+                x: (index % this.frozenGrid.columns) + 1,
+                y: Math.floor(index / this.frozenGrid.columns) + 1,
+                w: 1,
+                h: 1,
+            }));
+        }
+        if (current.length && current.some((entry) => !entry) && this.settings.gridMode !== "uniform") {
+            const descriptors = this.displayedItems.map((item, index) => ({
+                index,
+                aspect: this._masonryAspectFromSeed(item.layoutSeed, item.media?.type || "image"),
+            }));
+            const placements = this._buildPackedLayout(descriptors);
+            for (const placement of placements) {
+                current[placement.index] = {
+                    x: placement.x,
+                    y: placement.y,
+                    w: placement.w,
+                    h: placement.h,
+                };
+            }
+        }
+        this.frozenGeometry = current;
+        this.layoutGeometry = current.map((entry) => ({ ...entry }));
+        return this.frozenGeometry;
+    }
+
+    handleResize() {
+        if (this.frozenGeometry) {
+            this._applyFrozenGeometry();
+            return;
+        }
+        if (this.running) this.buildGrid();
+    }
+
+    clearLocks() {
+        const changed = this.displayedItems.some((item) => item.locked) || (this.pendingPins?.length || 0) > 0;
+        for (const item of this.displayedItems) {
+            item.locked = false;
+            if (item.media?.type === "video" && item.mediaEl) item.mediaEl.loop = this.settings.videoBehavior === "loop";
+            this._scheduleRotation(item);
+        }
+        this.pendingPins = null;
+        this.frozenGeometry = null;
+        this.frozenGrid = null;
+        if (changed) this._notifyChange("clear-locks");
+    }
+
+    toggleLock(itemOrIndex) {
+        const item = this._resolveItem(itemOrIndex);
+        if (!item) return false;
+        if (item.locked && !item.media && item.missingMediaKey) {
+            this._fillLockedPlaceholder(item);
+            this._notifyChange("lock", { item, locked: true });
+            return true;
+        }
+        item.locked = !item.locked;
+        if (item.locked) {
+            this.freezeLayout();
+            if (item.timer) clearTimeout(item.timer);
+            item.timer = null;
+            if (item.transitionTimer) clearTimeout(item.transitionTimer);
+            item.transitionTimer = null;
+            item.renderVersion += 1;
+            this._removeVideoHandler(item);
+            if (item.media?.type === "video" && item.mediaEl) item.mediaEl.loop = true;
+            if (!item.media) this._fillLockedPlaceholder(item);
+            else {
+                const key = this._mediaKey(item.media);
+                for (const duplicate of this.displayedItems) {
+                    if (duplicate !== item && !duplicate.locked && this._mediaKey(duplicate.media) === key) {
+                        this._replaceItem(duplicate, { clearWhenUnavailable: true });
+                    }
+                }
+            }
+        } else {
+            if (item.media?.type === "video" && item.mediaEl) item.mediaEl.loop = this.settings.videoBehavior === "loop";
+            this._scheduleRotation(item);
+        }
+        this._notifyChange("lock", { item, locked: item.locked });
+        return item.locked;
+    }
+
+    _fillLockedPlaceholder(item) {
+        const media = this.getNextMedia(item.targetAspect, item);
+        if (!media) return false;
+        item.media = media;
+        item.missingMediaKey = null;
+        item.mediaEl = this._createMediaEl(media);
+        if (media.type === "video" && item.locked) item.mediaEl.loop = true;
+        item.cell.appendChild(item.mediaEl);
+        item.mediaEl.classList.add("fade-in");
+        return true;
+    }
+
+    swapItems(aOrIndex, bOrIndex) {
+        const a = this._resolveItem(aOrIndex);
+        const b = this._resolveItem(bOrIndex);
+        if (!a || !b || a === b) return false;
+        this.freezeLayout();
+        for (const item of [a, b]) {
+            if (item.timer) clearTimeout(item.timer);
+            item.timer = null;
+            if (item.transitionTimer) clearTimeout(item.transitionTimer);
+            item.transitionTimer = null;
+            item.renderVersion += 1;
+            this._removeVideoHandler(item);
+        }
+        const [aMedia, aEl, aLocked, aMissingKey] = [a.media, a.mediaEl, a.locked, a.missingMediaKey];
+        const [bMedia, bEl, bLocked, bMissingKey] = [b.media, b.mediaEl, b.locked, b.missingMediaKey];
+        if (aEl) aEl.remove();
+        if (bEl) bEl.remove();
+        a.media = bMedia;
+        a.mediaEl = bEl;
+        a.locked = bLocked;
+        a.missingMediaKey = bMissingKey;
+        b.media = aMedia;
+        b.mediaEl = aEl;
+        b.locked = aLocked;
+        b.missingMediaKey = aMissingKey;
+        if (bEl) a.cell.appendChild(bEl);
+        if (aEl) b.cell.appendChild(aEl);
+        for (const item of [a, b]) {
+            if (item.locked && item.media?.type === "video" && item.mediaEl) item.mediaEl.loop = true;
+            this._scheduleRotation(item);
+        }
+        this._notifyChange("swap", { a, b });
+        return true;
+    }
+
+    ignoreMedia(media) {
+        const key = typeof media === "string" ? media : this._mediaKey(media);
+        if (!key) return false;
+        this.ignoredMedia.add(key);
+        this.filteredMedia.clear();
+        this.pool = this.pool.filter((candidate) => this._mediaKey(candidate) !== key);
+        this.freezeLayout();
+        for (const item of this.displayedItems) {
+            if (this._mediaKey(item.media) !== key) continue;
+            item.locked = false;
+            this._replaceItem(item, { clearWhenUnavailable: true, allowPaused: true });
+        }
+        this._notifyChange("ignore", { key });
+        return true;
+    }
+
+    restoreIgnored(key) {
+        if (!this.ignoredMedia.delete(key)) return false;
+        this.filteredMedia.clear();
+        this.reshufflePool();
+        this._notifyChange("restore-ignored", { key });
+        return true;
+    }
+
+    exportState() {
+        this.freezeLayout();
+        return {
+            version: 1,
+            settings: { ...this.settings },
+            geometry: (this.frozenGeometry || []).map((entry) => ({ ...entry })),
+            grid: { ...this.frozenGrid },
+            masonry: { columns: this.masonryColumns, rows: this.masonryRows },
+            pins: this.displayedItems
+                .map((item, index) => item.locked ? { index, mediaKey: this._mediaKey(item.media) || item.missingMediaKey } : null)
+                .filter(Boolean),
+            ignored: [...this.ignoredMedia],
+        };
+    }
+
+    async restoreState(snapshot, files) {
+        this.setMedia(files || []);
+        if (!snapshot || typeof snapshot !== "object") return;
+        this.settings = { ...this.settings, ...(snapshot.settings || {}) };
+        this.ignoredMedia = new Set(Array.isArray(snapshot.ignored) ? snapshot.ignored : []);
+        this.filteredMedia.clear();
+        this.frozenGeometry = Array.isArray(snapshot.geometry) ? snapshot.geometry.map((entry) => ({ ...entry })) : null;
+        this.frozenGrid = snapshot.grid ? { columns: snapshot.grid.columns, rows: snapshot.grid.rows } : null;
+        if (snapshot.masonry) {
+            this.masonryColumns = snapshot.masonry.columns || this.masonryColumns;
+            this.masonryRows = snapshot.masonry.rows || this.masonryRows;
+        }
+        const byKey = new Map(this.mediaFiles.map((media) => [this._mediaKey(media), media]));
+        this.pendingPins = Array.isArray(snapshot.pins) ? snapshot.pins.map((pin) => ({
+            index: pin.index,
+            mediaKey: pin.mediaKey,
+            media: byKey.get(pin.mediaKey) || null,
+        })) : [];
+        this.gridEl.dataset.fitMode = this.settings.fitMode;
+        this.reshufflePool();
+        if (this.running) this.buildGrid();
     }
 }
 
@@ -705,14 +1020,80 @@ const gapSlider = document.getElementById("gap-slider");
 const gapValue = document.getElementById("gap-value");
 const pauseBtn = document.getElementById("pause-btn");
 const fullscreenBtn = document.getElementById("fullscreen-btn");
+const presetSelect = document.getElementById("preset-select");
+const presetName = document.getElementById("preset-name");
+const saveNewPresetButton = document.getElementById("save-new-preset");
+const overwritePresetButton = document.getElementById("overwrite-preset");
+const unsavedIndicator = document.getElementById("unsaved-indicator");
+const ignoredGallery = document.getElementById("ignored-gallery");
+const showIgnoredButton = document.getElementById("restore-ignored");
+const decisionDialog = document.getElementById("decision-dialog");
+const decisionTitle = document.getElementById("decision-title");
+const decisionMessage = document.getElementById("decision-message");
+const decisionSave = document.getElementById("decision-save");
+const decisionDiscard = document.getElementById("decision-discard");
+const decisionCancel = document.getElementById("decision-cancel");
+
+const persistence = {
+    folderPath: null,
+    files: [],
+    presets: [],
+    selectedPresetId: null,
+    dirty: false,
+    busy: false,
+    confirmLeave: null,
+    saveNew: null,
+    overwrite: null,
+    loadPreset: null,
+};
+
+window.persistenceController = persistence;
+
+function setDirty(value = true) {
+    persistence.dirty = Boolean(value);
+    unsavedIndicator.classList.toggle("is-dirty", persistence.dirty);
+    unsavedIndicator.textContent = persistence.dirty ? "Unsaved changes" : "No unsaved changes";
+}
+setDirty(false);
+
+function showDecision({ title, message, saveLabel = "Save", discardLabel = "Discard", showDiscard = true } = {}) {
+    decisionTitle.textContent = title || "Save changes?";
+    decisionMessage.textContent = message || "Save your layout before you leave?";
+    decisionSave.textContent = saveLabel;
+    decisionDiscard.textContent = discardLabel;
+    decisionDiscard.hidden = !showDiscard;
+    decisionDialog.hidden = false;
+    decisionSave.focus();
+    return new Promise((resolve) => {
+        const finish = (value) => {
+            decisionDialog.hidden = true;
+            decisionSave.removeEventListener("click", onSave);
+            decisionDiscard.removeEventListener("click", onDiscard);
+            decisionCancel.removeEventListener("click", onCancel);
+            resolve(value);
+        };
+        const onSave = () => finish("save");
+        const onDiscard = () => finish("discard");
+        const onCancel = () => finish("cancel");
+        decisionSave.addEventListener("click", onSave, { once: true });
+        decisionDiscard.addEventListener("click", onDiscard, { once: true });
+        decisionCancel.addEventListener("click", onCancel, { once: true });
+    });
+}
+
+function showMessage(title, message) {
+    return showDecision({ title, message, saveLabel: "OK", showDiscard: false });
+}
 
 // ── Settings panel toggle ─────────────────────────────────────────────────────
 
 function openSettings() {
     settingsPanel.classList.add("open");
+    renderIgnoredGallery();
 }
 function closeSettings() {
     settingsPanel.classList.remove("open");
+    releaseIgnoredGallery();
 }
 function toggleSettings() {
     settingsPanel.classList.toggle("open");
@@ -727,6 +1108,240 @@ function setActiveToggle(buttons, predicate) {
     });
 }
 
+function presetLabel(preset) {
+    const savedAt = new Date(preset.createdAt).toLocaleString();
+    return preset.title ? `${preset.title} — ${savedAt}` : savedAt;
+}
+
+function renderPresetOptions() {
+    const selected = persistence.selectedPresetId;
+    presetSelect.replaceChildren(new Option("Choose a saved layout", ""));
+    for (const preset of persistence.presets) {
+        presetSelect.add(new Option(presetLabel(preset), preset.id));
+    }
+    presetSelect.value = selected || "";
+    overwritePresetButton.disabled = !selected || !persistence.presets.some((item) => item.id === selected);
+    saveNewPresetButton.disabled = !persistence.folderPath || persistence.busy;
+}
+
+let ignoredObserver = null;
+function releaseIgnoredGallery() {
+    ignoredObserver?.disconnect();
+    ignoredObserver = null;
+    ignoredGallery.querySelectorAll("video").forEach((video) => {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+    });
+}
+
+function renderIgnoredGallery() {
+    releaseIgnoredGallery();
+    ignoredGallery.replaceChildren();
+    const ignored = grid.ignoredMedia;
+    const ignoredCount = ignored?.size || 0;
+    showIgnoredButton.textContent = `${ignoredGallery.hidden ? "Show" : "Hide"} ignored media (${ignoredCount})`;
+    showIgnoredButton.setAttribute("aria-expanded", String(!ignoredGallery.hidden));
+    showIgnoredButton.disabled = ignoredCount === 0;
+    if (!ignored || ignored.size === 0) {
+        const empty = document.createElement("p");
+        empty.className = "setting-note";
+        empty.textContent = "No ignored media.";
+        ignoredGallery.appendChild(empty);
+        return;
+    }
+    if ("IntersectionObserver" in window) {
+        ignoredObserver = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                const video = entry.target;
+                if (entry.isIntersecting && video.dataset.src) {
+                    video.src = video.dataset.src;
+                    video.preload = "metadata";
+                    video.removeAttribute("data-src");
+                } else if (!entry.isIntersecting && video.src) {
+                    video.pause();
+                    video.removeAttribute("src");
+                    video.preload = "none";
+                    video.load();
+                    video.dataset.src = video.dataset.originalSrc;
+                }
+            }
+        }, { root: settingsPanel, rootMargin: "100px" });
+    }
+    for (const key of ignored) {
+        const media = persistence.files.find((item) => (item.path || item.url) === key);
+        if (!media) continue;
+        const card = document.createElement("div");
+        card.className = "ignored-card";
+        const thumbnail = document.createElement(media.type === "video" ? "video" : "img");
+        thumbnail.alt = media.name || "Ignored media";
+        if (media.type === "video") {
+            thumbnail.muted = true;
+            thumbnail.preload = "none";
+            thumbnail.dataset.src = media.url;
+            thumbnail.dataset.originalSrc = media.url;
+            if (ignoredObserver) ignoredObserver.observe(thumbnail);
+        } else {
+            thumbnail.loading = "lazy";
+            thumbnail.src = media.url;
+        }
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = `Restore ${media.name || "media"}`;
+        button.title = button.textContent;
+        button.addEventListener("click", () => {
+            if (grid.restoreIgnored(key)) {
+                setDirty();
+                renderIgnoredGallery();
+            }
+        });
+        card.append(thumbnail, button);
+        ignoredGallery.appendChild(card);
+    }
+}
+
+showIgnoredButton.addEventListener("click", () => {
+    ignoredGallery.hidden = !ignoredGallery.hidden;
+    renderIgnoredGallery();
+    if (ignoredGallery.hidden) releaseIgnoredGallery();
+});
+
+function syncSettingsControls() {
+    setActiveToggle(modeButtons, (button) => button.dataset.mode === grid.settings.gridMode);
+    setActiveToggle(redrawButtons, (button) => (button.dataset.redraw === "on") === grid.settings.redrawOnRefresh);
+    setActiveToggle(mediaFilterButtons, (button) => button.dataset.mediaFilter === grid.settings.mediaFilter);
+    setActiveToggle(fitModeButtons, (button) => button.dataset.fitMode === grid.settings.fitMode);
+    document.querySelectorAll("[data-video]").forEach((button) => button.classList.toggle("active", button.dataset.video === grid.settings.videoBehavior));
+    slotsSlider.value = String(grid.settings.slotCount);
+    slotsValue.textContent = String(grid.settings.slotCount);
+    imageTimeSlider.value = String(grid.settings.imageTime);
+    imageTimeValue.textContent = `${grid.settings.imageTime} s`;
+    gapSlider.value = String(grid.settings.gap);
+    gapValue.textContent = `${grid.settings.gap} px`;
+}
+
+async function refreshPresets() {
+    if (!persistence.folderPath) return;
+    persistence.presets = await window.mediaAPI.listPresets(persistence.folderPath);
+    renderPresetOptions();
+}
+
+async function saveNew() {
+    if (!persistence.folderPath || persistence.busy) return false;
+    persistence.busy = true;
+    saveNewPresetButton.disabled = true;
+    overwritePresetButton.disabled = true;
+    try {
+        const preset = await window.mediaAPI.savePreset(persistence.folderPath, presetName.value, grid.exportState());
+        persistence.presets.push(preset);
+        persistence.selectedPresetId = preset.id;
+        renderPresetOptions();
+        setDirty(false);
+        return true;
+    } catch (error) {
+        await showMessage("Could not save layout", error.message || "The layout was not saved.");
+        return false;
+    } finally {
+        persistence.busy = false;
+        saveNewPresetButton.disabled = !persistence.folderPath;
+        overwritePresetButton.disabled = !persistence.selectedPresetId;
+    }
+}
+
+async function overwrite() {
+    if (!persistence.folderPath || !persistence.selectedPresetId) return saveNew();
+    if (persistence.busy) return false;
+    persistence.busy = true;
+    saveNewPresetButton.disabled = true;
+    overwritePresetButton.disabled = true;
+    try {
+        const preset = await window.mediaAPI.savePreset(
+            persistence.folderPath, presetName.value, grid.exportState(), persistence.selectedPresetId
+        );
+        persistence.presets = persistence.presets.map((item) => item.id === preset.id ? preset : item);
+        renderPresetOptions();
+        setDirty(false);
+        return true;
+    } catch (error) {
+        await showMessage("Could not save layout", error.message || "The layout was not saved.");
+        return false;
+    } finally {
+        persistence.busy = false;
+        saveNewPresetButton.disabled = !persistence.folderPath;
+        overwritePresetButton.disabled = !persistence.selectedPresetId;
+    }
+}
+
+async function saveCurrent() {
+    if (!persistence.selectedPresetId) return saveNew();
+    const choice = await showDecision({
+        title: "Save layout",
+        message: "Save these changes as a new layout or replace the selected layout?",
+        saveLabel: "Save New",
+        discardLabel: "Overwrite",
+    });
+    if (choice === "save") return saveNew();
+    if (choice === "discard") return overwrite();
+    return false;
+}
+
+async function confirmLeave(reason = "leave") {
+    if (!persistence.dirty) return true;
+    const result = await showDecision({
+        title: "Unsaved layout",
+        message: `Save your layout before you ${reason}?`,
+    });
+    if (result === "cancel") return false;
+    if (result === "discard") return true;
+    return saveCurrent();
+}
+
+persistence.saveNew = saveNew;
+persistence.overwrite = overwrite;
+persistence.confirmLeave = confirmLeave;
+persistence.loadPreset = async (presetId) => {
+    if (!presetId) return false;
+    if (!(await confirmLeave("open another layout"))) return false;
+    const preset = persistence.presets.find((item) => item.id === presetId);
+    if (!preset) return false;
+    persistence.files = await window.mediaAPI.getMediaFiles(persistence.folderPath);
+    await grid.restoreState(preset.snapshot, persistence.files);
+    persistence.selectedPresetId = preset.id;
+    presetName.value = preset.title;
+    syncSettingsControls();
+    renderPresetOptions();
+    setDirty(false);
+    renderIgnoredGallery();
+    return true;
+};
+
+grid.onChange = (event) => {
+    setDirty();
+    if (event.type === "ignore" || event.type === "restore-ignored") renderIgnoredGallery();
+    for (const item of grid.displayedItems) {
+        item.cell.classList.toggle("is-locked", Boolean(item.locked));
+        item.cell.classList.toggle("is-missing-pin", Boolean(item.locked && !item.media && item.missingMediaKey));
+        item.cell.setAttribute("role", "button");
+        item.cell.tabIndex = 0;
+        item.cell.setAttribute("aria-label", `${item.media?.name || "Empty media slot"}${item.locked ? ", locked" : ", unlocked"}`);
+    }
+};
+
+saveNewPresetButton.addEventListener("click", saveNew);
+overwritePresetButton.addEventListener("click", overwrite);
+presetSelect.addEventListener("change", async () => {
+    const targetId = presetSelect.value;
+    if (!targetId) {
+        persistence.selectedPresetId = null;
+        overwritePresetButton.disabled = true;
+        return;
+    }
+    if (!(await persistence.loadPreset(targetId))) renderPresetOptions();
+});
+presetName.addEventListener("input", () => {
+    if (persistence.selectedPresetId) setDirty();
+});
+
 // ── Grid mode buttons ─────────────────────────────────────────────────────────
 
 const modeButtons = document.querySelectorAll("[data-mode]");
@@ -734,10 +1349,30 @@ const redrawButtons = document.querySelectorAll("[data-redraw]");
 const mediaFilterButtons = document.querySelectorAll("[data-media-filter]");
 const fitModeButtons = document.querySelectorAll("[data-fit-mode]");
 
+async function updateLayoutWithConfirmation(changes) {
+    if (Object.entries(changes).every(([key, value]) => grid.settings[key] === value)) return true;
+    const layoutChange = ("gridMode" in changes && changes.gridMode !== grid.settings.gridMode) ||
+        ("slotCount" in changes && changes.slotCount !== grid.settings.slotCount);
+    if (layoutChange) {
+        const choice = await showDecision({
+            title: "Clear locked tiles?",
+            message: "Changing the grid mode or slot count clears locked tiles and saved positions. Ignored media stays ignored.",
+            saveLabel: "Continue",
+            showDiscard: false,
+        });
+        if (choice !== "save") return false;
+        grid.clearLocks();
+    }
+    grid.updateSettings(changes);
+    setDirty();
+    return true;
+}
+
 modeButtons.forEach((btn) => {
-    btn.addEventListener("click", () => {
-        setActiveToggle(modeButtons, (button) => button === btn);
-        grid.updateSettings({ gridMode: btn.dataset.mode });
+    btn.addEventListener("click", async () => {
+        if (await updateLayoutWithConfirmation({ gridMode: btn.dataset.mode })) {
+            setActiveToggle(modeButtons, (button) => button === btn);
+        }
     });
 });
 
@@ -745,20 +1380,16 @@ redrawButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
         setActiveToggle(redrawButtons, (button) => button === btn);
         grid.updateSettings({ redrawOnRefresh: btn.dataset.redraw === "on" });
+        setDirty();
     });
 });
 
 mediaFilterButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
         const nextFilter = btn.dataset.mediaFilter;
-
-        if (grid.mediaFiles.length > 0 && grid.countMediaForFilter(nextFilter) === 0) {
-            alert(`No ${nextFilter === "video" ? "videos" : "images"} found in the current folder.`);
-            return;
-        }
-
         setActiveToggle(mediaFilterButtons, (button) => button === btn);
         grid.updateSettings({ mediaFilter: nextFilter });
+        setDirty();
     });
 });
 
@@ -766,6 +1397,7 @@ fitModeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
         setActiveToggle(fitModeButtons, (button) => button === btn);
         grid.updateSettings({ fitMode: btn.dataset.fitMode });
+        setDirty();
     });
 });
 
@@ -776,6 +1408,7 @@ document.querySelectorAll("[data-video]").forEach((btn) => {
         document.querySelectorAll("[data-video]").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
         grid.updateSettings({ videoBehavior: btn.dataset.video });
+        setDirty();
     });
 });
 
@@ -784,19 +1417,24 @@ document.querySelectorAll("[data-video]").forEach((btn) => {
 slotsSlider.addEventListener("input", () => {
     const val = parseInt(slotsSlider.value, 10);
     slotsValue.textContent = val;
-    grid.updateSettings({ slotCount: val });
+});
+slotsSlider.addEventListener("change", async () => {
+    const val = parseInt(slotsSlider.value, 10);
+    if (!(await updateLayoutWithConfirmation({ slotCount: val }))) syncSettingsControls();
 });
 
 imageTimeSlider.addEventListener("input", () => {
     const val = parseInt(imageTimeSlider.value, 10);
     imageTimeValue.textContent = `${val} s`;
     grid.updateSettings({ imageTime: val });
+    setDirty();
 });
 
 gapSlider.addEventListener("input", () => {
     const val = parseInt(gapSlider.value, 10);
     gapValue.textContent = `${val} px`;
     grid.updateSettings({ gap: val });
+    setDirty();
 });
 
 // ── Pause / resume ────────────────────────────────────────────────────────────
@@ -829,23 +1467,26 @@ document.addEventListener("fullscreenchange", () => {
 // ── Load folder ───────────────────────────────────────────────────────────────
 
 async function loadFolder() {
+    if (!(await confirmLeave("open another folder"))) return;
     const result = await window.mediaAPI.selectFolder();
     if (!result) return;
 
     const { folderPath, files } = result;
 
-    if (files.length === 0) {
-        alert(
-            "No media files found in the selected folder.\n\n" +
-                "Supported images: JPG, PNG, GIF, WEBP, BMP, AVIF\n" +
-                "Supported videos: MP4, WEBM, MOV, AVI, MKV, M4V, OGV"
-        );
-        return;
-    }
-
-    folderPathEl.textContent = folderPath;
-
     await grid.setMedia(files);
+    persistence.folderPath = folderPath;
+    persistence.files = files;
+    persistence.selectedPresetId = null;
+    persistence.presets = [];
+    presetName.value = "";
+    folderPathEl.textContent = folderPath;
+    try {
+        await refreshPresets();
+    } catch (error) {
+        persistence.presets = [];
+        renderPresetOptions();
+        await showMessage("Saved layouts unavailable", error.message || "Saved layouts could not be read.");
+    }
 
     if (grid.countMediaForFilter() === 0) {
         setActiveToggle(mediaFilterButtons, (button) => button.dataset.mediaFilter === "mixed");
@@ -863,6 +1504,9 @@ async function loadFolder() {
         grid.start();
     }
 
+    setDirty(false);
+    renderIgnoredGallery();
+
     closeSettings();
 }
 
@@ -875,14 +1519,131 @@ let resizeTimer;
 window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-        if (grid.running) grid.buildGrid();
+        if (grid.running) grid.handleResize();
     }, 250);
+});
+
+const cellObserver = new MutationObserver((records) => {
+    for (const record of records) {
+        for (const node of record.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            const cells = [];
+            if (node.matches?.(".grid-cell")) cells.push(node);
+            node.querySelectorAll?.(".grid-cell").forEach((cell) => cells.push(cell));
+            for (const cell of cells) {
+                const item = itemForCell(cell);
+                cell.draggable = true;
+                cell.setAttribute("role", "button");
+                cell.tabIndex = 0;
+                cell.classList.toggle("is-locked", Boolean(item?.locked));
+                cell.classList.toggle("is-missing-pin", Boolean(item?.locked && !item.media && item.missingMediaKey));
+                cell.setAttribute("aria-label", `${item?.media?.name || (item?.missingMediaKey ? "File missing" : "Empty media slot")}${item?.locked ? ", locked" : ", unlocked"}`);
+            }
+        }
+    }
+});
+cellObserver.observe(gridEl, { childList: true, subtree: true });
+
+function itemForCell(cell) {
+    return grid.displayedItems.find((item) => item.cell === cell) || null;
+}
+
+gridEl.addEventListener("click", (event) => {
+    if (Date.now() < suppressClickUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+    }
+    const cell = event.target.closest?.(".grid-cell");
+    const item = cell && itemForCell(cell);
+    if (item && (item.media || (item.locked && item.missingMediaKey))) {
+        grid.toggleLock(item);
+        cell.classList.toggle("is-locked", Boolean(item.locked));
+        cell.classList.toggle("is-missing-pin", Boolean(item.locked && !item.media && item.missingMediaKey));
+        cell.setAttribute("aria-label", `${item.media?.name || "File missing"}${item.locked ? ", locked" : ", unlocked"}`);
+    }
+});
+
+gridEl.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const cell = event.target.closest?.(".grid-cell");
+    const item = cell && itemForCell(cell);
+    if (!item || (!item.media && !(item.locked && item.missingMediaKey))) return;
+    event.preventDefault();
+    grid.toggleLock(item);
+    cell.classList.toggle("is-locked", Boolean(item.locked));
+    cell.classList.toggle("is-missing-pin", Boolean(item.locked && !item.media && item.missingMediaKey));
+    cell.setAttribute("aria-label", `${item.media?.name || "File missing"}${item.locked ? ", locked" : ", unlocked"}`);
+});
+
+gridEl.addEventListener("contextmenu", (event) => {
+    const cell = event.target.closest?.(".grid-cell");
+    const item = cell && itemForCell(cell);
+    if (!item || (!item.media && !(item.locked && item.missingMediaKey))) return;
+    event.preventDefault();
+    grid.ignoreMedia(item.media);
+    renderIgnoredGallery();
+});
+
+let draggedItem = null;
+let suppressClickUntil = 0;
+gridEl.addEventListener("dragstart", (event) => {
+    const cell = event.target.closest?.(".grid-cell");
+    draggedItem = cell && itemForCell(cell);
+    if (!draggedItem?.media) {
+        event.preventDefault();
+        draggedItem = null;
+        return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+});
+gridEl.addEventListener("dragover", (event) => {
+    if (draggedItem) event.preventDefault();
+});
+gridEl.addEventListener("drop", (event) => {
+    const cell = event.target.closest?.(".grid-cell");
+    const target = cell && itemForCell(cell);
+    if (!draggedItem || !target) return;
+    event.preventDefault();
+    grid.swapItems(draggedItem, target);
+    suppressClickUntil = Date.now() + 350;
+    draggedItem = null;
+});
+gridEl.addEventListener("dragend", () => { draggedItem = null; });
+
+window.mediaAPI.onCloseRequest(async () => {
+    if (!persistence.dirty) {
+        releaseIgnoredGallery();
+        await window.mediaAPI.resolveClose("discard");
+        return;
+    }
+    const action = await showDecision({
+        title: persistence.dirty ? "Unsaved layout" : "Close Multi-Display?",
+        message: persistence.dirty ? "Save your layout before closing?" : "Close the application?",
+        saveLabel: persistence.dirty ? "Save" : "Close",
+        discardLabel: "Discard",
+        showDiscard: persistence.dirty,
+    });
+    if (action === "cancel") {
+        await window.mediaAPI.resolveClose("cancel");
+        return;
+    }
+    if (action === "save" && persistence.dirty && !(await saveCurrent())) {
+        await window.mediaAPI.resolveClose("cancel");
+        return;
+    }
+    releaseIgnoredGallery();
+    await window.mediaAPI.resolveClose(action === "discard" ? "discard" : "saved");
 });
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────────────
 
 document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT") return;
+    if (!decisionDialog.hidden) {
+        if (e.key === "Escape") decisionCancel.click();
+        return;
+    }
+    if (e.target.matches?.("input, textarea, select, button, [contenteditable='true']")) return;
     switch (e.key) {
         case "s":
         case "S":

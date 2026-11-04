@@ -6,8 +6,10 @@ const { app, BrowserWindow } = require('electron');
 
 const session = path.resolve(__dirname, '../out/benchmark-session');
 const fixtures = path.join(session, 'media');
+const emptyFolder = path.join(session, 'empty-media');
 const resultsPath = path.resolve(__dirname, '../out/benchmark-results.json');
 const expectedGrowthBytes = 32 * 1024 * 1024;
+const benchmarkCaseCount = 7;
 const minimumFreeGiB = Number(process.env.MULTI_DISPLAY_BENCHMARK_MIN_FREE_GIB || 10);
 if (!Number.isFinite(minimumFreeGiB) || minimumFreeGiB < 0) throw new Error('Invalid minimum disk reserve');
 const disk = fs.statfsSync(__dirname);
@@ -20,10 +22,11 @@ if (freeBytes - expectedGrowthBytes < minimumFreeGiB * 1024 ** 3) {
     app.exit(1);
 } else {
     fs.mkdirSync(fixtures, { recursive: true });
+    fs.mkdirSync(emptyFolder, { recursive: true });
     fs.mkdirSync(path.join(session, 'profile'), { recursive: true });
     fs.writeFileSync(path.resolve(__dirname, '../out/benchmark-resource-plan.json'), JSON.stringify({
         freeBytes, expectedGrowthBytes, minimumFreeGiB, modelSpendCeilingUSD: 0, paidModelCalls: 0,
-        cases: 6, repetitions: 3, scoring: 'deterministic assertions and performance limits',
+        cases: benchmarkCaseCount, repetitions: 3, scoring: 'deterministic assertions and performance limits',
     }, null, 2));
     app.setPath('userData', path.join(session, 'profile'));
     require('../main.js');
@@ -90,11 +93,14 @@ async function run() {
     });
     const suite = fs.readFileSync(path.join(__dirname, 'page-benchmark.js'), 'utf8');
     await window.webContents.executeJavaScript(suite);
-    const results = await window.webContents.executeJavaScript(`runPerformanceSuite(${JSON.stringify(fixtures)}, 3)`);
+    const results = await window.webContents.executeJavaScript(`runPerformanceSuite(${JSON.stringify(fixtures)}, 3, ${JSON.stringify(emptyFolder)})`);
     if (errors.length) throw new Error(`Renderer errors: ${errors.join('; ')}`);
-    fs.writeFileSync(resultsPath, JSON.stringify({ passed: true, cases: 6, repetitions: 3, results }, null, 2));
+    if (results.length !== benchmarkCaseCount * 3) {
+        throw new Error(`Expected ${benchmarkCaseCount * 3} benchmark runs; received ${results.length}.`);
+    }
+    fs.writeFileSync(resultsPath, JSON.stringify({ passed: true, cases: benchmarkCaseCount, repetitions: 3, results }, null, 2));
     for (const result of results) console.log(JSON.stringify(result));
-    console.log('PASS: 6 cases, 3 repetitions each; real Electron app and worker.');
+    console.log(`PASS: ${benchmarkCaseCount} cases, 3 repetitions each; real Electron app and worker.`);
     clearTimeout(watchdog);
     app.exit(0);
 }
