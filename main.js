@@ -44,7 +44,7 @@ ipcMain.handle('select-folder', async () => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   const folderPath = result.filePaths[0];
-  return { folderPath, files: getMediaFiles(folderPath) };
+  return { folderPath, files: await getMediaFiles(folderPath) };
 });
 
 // ── IPC: re-scan a folder ────────────────────────────────────────────────────
@@ -62,10 +62,10 @@ const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v', '.ogv',
 ]);
 
-function getMediaFiles(folderPath) {
+async function getMediaFiles(folderPath) {
   try {
-    const entries = fs.readdirSync(folderPath, { withFileTypes: true });
-    return entries
+    const entries = await fs.promises.readdir(folderPath, { withFileTypes: true });
+    const files = entries
       .filter((e) => e.isFile())
       .map((e) => {
         const ext = path.extname(e.name).toLowerCase();
@@ -84,6 +84,22 @@ function getMediaFiles(folderPath) {
         };
       })
       .filter(Boolean);
+    // File identity invalidates cached dimensions after a file changes.
+    // Bound stat calls so large folders do not saturate the disk.
+    let nextIndex = 0;
+    await Promise.all(Array.from({ length: Math.min(8, files.length) }, async () => {
+      while (nextIndex < files.length) {
+        const file = files[nextIndex++];
+        try {
+          const stat = await fs.promises.stat(file.path);
+          file.size = stat.size;
+          file.modified = stat.mtimeMs;
+        } catch {
+          file.unavailable = true;
+        }
+      }
+    }));
+    return files.filter((file) => !file.unavailable);
   } catch (err) {
     console.error('Error reading folder:', err);
     return [];
