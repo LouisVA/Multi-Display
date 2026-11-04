@@ -75,7 +75,9 @@ async function run() {
     await app.whenReady();
     const window = BrowserWindow.getAllWindows()[0];
     window.webContents.setBackgroundThrottling(false);
-    window.hide();
+    // Hidden windows can receive paint frames only once a second. Measure the
+    // displayed app without taking keyboard focus from the user.
+    window.showInactive();
     if (window.webContents.isLoading()) {
         await new Promise((resolve, reject) => {
             window.webContents.once('did-finish-load', resolve);

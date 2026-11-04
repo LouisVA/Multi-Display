@@ -32,13 +32,21 @@ async function runPerformanceSuite(folder, repetitions) {
         await grid.setMedia(images);
         assert(grid.metadata.active === 0 && grid.metadata.jobs.size === 0, 'Opening a folder must not probe all files');
         grid.start();
+        const constructedAt = performance.now();
         assert(grid.displayedItems.length === 12, 'The first grid must have 12 tiles');
         await until(() => grid.displayedItems.every((item) => item.mediaEl.naturalWidth > 0), 'Visible images did not load');
+        const loadedAt = performance.now();
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const firstGridMs = performance.now() - started;
-        assert(firstGridMs < 500, 'The loaded first grid must be ready within 500 ms');
+        const timings = {
+            constructionMs: +(constructedAt - started).toFixed(2),
+            imageLoadMs: +(loadedAt - constructedAt).toFixed(2),
+            paintWaitMs: +(performance.now() - loadedAt).toFixed(2),
+            visibility: document.visibilityState,
+        };
+        assert(firstGridMs < 500, `The loaded first grid must be ready within 500 ms: ${JSON.stringify(timings)}`);
         assert(grid.mediaMetrics.size <= 12, 'Only visible media should be measured');
-        return { firstGridMs: +firstGridMs.toFixed(2), files: images.length, measured: grid.mediaMetrics.size };
+        return { firstGridMs: +firstGridMs.toFixed(2), files: images.length, measured: grid.mediaMetrics.size, ...timings };
     });
 
     await check('bounded-metadata-probes', async () => {
