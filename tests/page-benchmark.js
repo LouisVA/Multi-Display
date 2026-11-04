@@ -16,11 +16,31 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
     assert(images.length === 1000 && video, 'The fixture scan must include 1,000 images and one video');
     assert(files.every((file) => Number.isFinite(file.size) && Number.isFinite(file.modified)), 'File identities are required');
     const results = [];
+    // Let the initial window resize debounce finish before measuring folder load.
+    // There is no active grid during this setup period.
+    await new Promise((resolve) => {
+        let settledTimer;
+        const finish = () => {
+            window.removeEventListener('resize', afterResize);
+            resolve();
+        };
+        const afterResize = () => {
+            clearTimeout(settledTimer);
+            settledTimer = setTimeout(finish, 350);
+        };
+        window.addEventListener('resize', afterResize);
+        afterResize();
+    });
     const check = async (name, body) => {
         for (let repetition = 1; repetition <= repetitions; repetition++) {
             grid.stop();
             const started = performance.now();
-            const metrics = await body();
+            let metrics;
+            try {
+                metrics = await body();
+            } catch (error) {
+                throw new Error(`${name}, repetition ${repetition}: ${error.message}`);
+            }
             results.push({ name, repetition, elapsedMs: +(performance.now() - started).toFixed(2), ...metrics });
         }
     };
@@ -45,7 +65,7 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
             visibility: document.visibilityState,
         };
         assert(firstGridMs < 500, `The loaded first grid must be ready within 500 ms: ${JSON.stringify(timings)}`);
-        assert(grid.mediaMetrics.size <= 12, 'Only visible media should be measured');
+        assert(grid.mediaMetrics.size <= 12, `Only visible media should be measured: ${grid.mediaMetrics.size} measured for ${grid.displayedItems.length} tiles`);
         return { firstGridMs: +firstGridMs.toFixed(2), files: images.length, measured: grid.mediaMetrics.size, ...timings };
     });
 
@@ -368,7 +388,207 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
         return { uniqueVisible: 8, presetsSaved: controller.presets.length, pinnedVideo: true, ignoredRestored: true, emptyFolderTiles };
     });
 
-    assert(results.length === 7 * repetitions, `The complete suite must produce ${7 * repetitions} case runs`);
+    await check('ctrl-click-tile-merging', async () => {
+        const waitFor = (condition, message) => until(condition, message);
+        const fileKey = (media) => media?.path || media?.url;
+        const ctrlClick = (item) => item.cell.dispatchEvent(new MouseEvent('click', {
+            bubbles: true, cancelable: true, ctrlKey: true,
+        }));
+        const cancelSelection = () => document.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', bubbles: true, cancelable: true,
+        }));
+        const rectOf = (item) => grid.layoutGeometry[grid.displayedItems.indexOf(item)];
+        const tileAt = (x, y, w = 1, h = 1) => grid.displayedItems.find((item) => {
+            const rect = rectOf(item);
+            return rect && rect.x === x && rect.y === y && rect.w === w && rect.h === h;
+        });
+        const sameGeometry = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        const attemptMerge = (first, second) => {
+            ctrlClick(first);
+            assert(first.selectedForMerge && first.cell.classList.contains('merge-selected'), 'Ctrl-click must highlight the first selected tile');
+            ctrlClick(second);
+            const selected = first.selectedForMerge;
+            cancelSelection();
+            return selected;
+        };
+        const findFullEdgePair = () => {
+            for (let left = 0; left < grid.displayedItems.length; left++) {
+                const a = rectOf(grid.displayedItems[left]);
+                for (let right = left + 1; right < grid.displayedItems.length; right++) {
+                    const b = rectOf(grid.displayedItems[right]);
+                    const horizontal = a.y === b.y && a.h === b.h && (a.x + a.w === b.x || b.x + b.w === a.x);
+                    const vertical = a.x === b.x && a.w === b.w && (a.y + a.h === b.y || b.y + b.h === a.y);
+                    if (horizontal || vertical) return [grid.displayedItems[left], grid.displayedItems[right]];
+                }
+            }
+            return null;
+        };
+        const assertNoOverlap = () => {
+            const occupied = new Set();
+            for (const item of grid.displayedItems) {
+                const rect = rectOf(item);
+                for (let y = rect.y; y < rect.y + rect.h; y++) {
+                    for (let x = rect.x; x < rect.x + rect.w; x++) {
+                        const key = `${x}:${y}`;
+                        assert(!occupied.has(key), 'Merged tiles must not overlap another tile');
+                        occupied.add(key);
+                    }
+                }
+            }
+        };
+
+        grid.stop();
+        grid.updateSettings({ gridMode: 'uniform', slotCount: 12, imageTime: 120, mediaFilter: 'mixed', gap: 2 });
+        await grid.setMedia(files);
+        grid.pool = [video];
+        grid.start();
+        grid.freezeLayout();
+        const controller = persistenceController;
+        controller.folderPath = folder;
+        controller.files = files;
+        controller.presets = await window.mediaAPI.listPresets(folder);
+        controller.selectedPresetId = null;
+        controller.dirty = false;
+        assert(grid.displayedItems.length === 12, 'The merge layout must start with 12 tiles');
+        const first = tileAt(1, 1);
+        const topRight = tileAt(2, 1);
+        const lowerLeft = tileAt(1, 2);
+        const lowerRight = tileAt(2, 2);
+        assert(first && topRight && lowerLeft && lowerRight, 'The uniform grid must expose the expected adjacent cells');
+        assert(first.media.type === 'video', 'The test video must be the first tile');
+
+        assert(controller.dirty === false, 'The merge fixture must start with no unsaved changes');
+        ctrlClick(first);
+        assert(first.selectedForMerge && !first.locked, 'Ctrl-click selection must not toggle the normal lock state');
+        assert(controller.dirty === false, 'Merge selection must not mark the layout as changed');
+        ctrlClick(first);
+        assert(!first.selectedForMerge && !first.locked, 'Ctrl-clicking the same tile twice must cancel selection');
+        ctrlClick(first);
+        assert(first.selectedForMerge, 'Ctrl-click must select the tile again after cancellation');
+        cancelSelection();
+        assert(!first.selectedForMerge && !first.locked, 'Escape must cancel a merge selection without changing the tile');
+
+        const reverseFirst = tileAt(2, 3);
+        const reverseSecond = tileAt(1, 3);
+        const reverseMedia = reverseFirst.media;
+        grid._replaceItem(reverseFirst);
+        await waitFor(() => reverseFirst.transitionTimer !== null, 'The reverse-order tile must enter a pending media transition');
+        ctrlClick(reverseFirst);
+        reverseSecond.cell.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+        assert(!grid.displayedItems.includes(reverseSecond) && reverseFirst.media === reverseMedia, 'Reverse-order selection must retain the first selected media');
+        assert(reverseFirst.transitionTimer === null && !reverseFirst.mediaEl.classList.contains('fade-out'), 'Merging the first tile must cancel its pending fade');
+
+        const otherPin = tileAt(4, 3);
+        const otherPinMedia = otherPin.media;
+        otherPin.cell.click();
+        assert(otherPin.locked, 'A second locked tile must be present');
+
+        const firstMedia = first.media;
+        const firstMediaEl = first.mediaEl;
+        first.cell.click();
+        topRight.cell.click();
+        assert(first.locked && topRight.locked && first.media.type === 'video' && first.mediaEl.loop, 'Both merge inputs can be locked while a video keeps looping');
+        controller.dirty = false;
+
+        const invalidDiagonal = tileAt(2, 2);
+        const diagonalGeometry = grid.layoutGeometry.map((rect) => ({ ...rect }));
+        assert(attemptMerge(first, invalidDiagonal), 'A diagonal second selection must keep the first tile selected until Escape');
+        assert(sameGeometry(grid.layoutGeometry, diagonalGeometry) && controller.dirty === false, 'A rejected diagonal must keep geometry and dirty state unchanged');
+        assert(first.locked && invalidDiagonal.media, 'A rejected diagonal must keep media and locks');
+
+        const releasedTop = topRight.media;
+        ctrlClick(first);
+        assert(first.selectedForMerge, 'The first Ctrl-click must select the tile');
+        topRight.cell.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+        assert(!grid.displayedItems.includes(topRight) && first.locked && first.media === firstMedia && first.mediaEl === firstMediaEl, 'A horizontal merge must keep the first video, its element, and its lock');
+        assert(topRight.timer === null && topRight.transitionTimer === null, 'A removed tile must release both timers');
+        grid.reshufflePool();
+        assert(grid.pool.some((media) => fileKey(media) === fileKey(releasedTop)) && !grid.ignoredMedia.has(fileKey(releasedTop)), 'A locked second tile must return to the eligible pool after reshuffle, without being ignored');
+
+        controller.dirty = false;
+        const mergedFirstGeometry = grid.layoutGeometry.map((rect) => ({ ...rect }));
+        for (const badNeighbor of [lowerLeft, tileAt(3, 2), lowerRight]) {
+            assert(attemptMerge(first, badNeighbor), 'An invalid L-shaped or partial-edge selection must keep the first tile selected until Escape');
+            assert(sameGeometry(grid.layoutGeometry, mergedFirstGeometry) && controller.dirty === false, 'An invalid merge must leave geometry and dirty state unchanged');
+            assert(first.locked && first.media === firstMedia && badNeighbor.media, 'An invalid merge must keep the media and lock states');
+        }
+
+        const releasedLower = lowerRight.media;
+        ctrlClick(lowerLeft);
+        lowerRight.cell.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+        assert(rectOf(lowerLeft).w === 2 && rectOf(lowerLeft).h === 1, 'A second horizontal merge must make a two-cell rectangle');
+        assert(grid.pool.some((media) => fileKey(media) === fileKey(releasedLower)), 'A second released tile must also return to the pool');
+        ctrlClick(first);
+        lowerLeft.cell.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+        const repeatedShape = rectOf(first);
+        assert(repeatedShape.x === 1 && repeatedShape.y === 1 && repeatedShape.w === 2 && repeatedShape.h === 2, 'A repeated vertical merge must make a two-by-two tile');
+        assert(first.locked && first.media === firstMedia, 'Repeated merges must preserve the first media and its lock');
+        assert(otherPin.locked && otherPin.media === otherPinMedia, 'A separate locked tile must remain unchanged');
+        assert(!grid.ignoredMedia.has(fileKey(releasedTop)) && !grid.ignoredMedia.has(fileKey(releasedLower)), 'Merging must not add released media to the ignored set');
+        assertNoOverlap();
+
+        const uniformSnapshot = grid.exportState();
+        assert(uniformSnapshot.geometry[0].w === 2 && uniformSnapshot.geometry[0].h === 2, 'Export must preserve the merged uniform tile span');
+        controller.presets = await window.mediaAPI.listPresets(folder);
+        controller.selectedPresetId = null;
+        controller.dirty = false;
+        const runId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+        document.getElementById('preset-name').value = `Tile merge ${runId}`;
+        const oldPresetCount = controller.presets.length;
+        document.getElementById('save-new-preset').click();
+        await waitFor(() => controller.presets.length === oldPresetCount + 1, 'Save New must write the merged layout through the app IPC');
+        const uniformPreset = controller.presets.find((preset) => preset.title === `Tile merge ${runId}`);
+        let diskPreset = (await window.mediaAPI.listPresets(folder)).find((preset) => preset.id === uniformPreset.id);
+        assert(diskPreset.snapshot.geometry[0].w === 2 && diskPreset.snapshot.geometry[0].h === 2, 'The saved preset file must contain the merged span');
+
+        document.querySelector('[data-media-filter="image"]').click();
+        document.getElementById('gap-slider').value = '7';
+        document.getElementById('gap-slider').dispatchEvent(new Event('input', { bubbles: true }));
+        const originalWidth = gridEl.style.width;
+        gridEl.style.width = `${Math.max(320, gridEl.clientWidth - 140)}px`;
+        window.dispatchEvent(new Event('resize'));
+        await wait(300);
+        const changedGeometry = grid.layoutGeometry.map((rect) => ({ ...rect }));
+        assert(changedGeometry[0].w === 2 && changedGeometry[0].h === 2, 'Filter, gap, and resize must retain the uniform merge span');
+        assert(grid.displayedItems[0].locked && fileKey(grid.displayedItems[0].media) === fileKey(video), 'Filtering must keep the merged pinned video');
+        document.getElementById('overwrite-preset').click();
+        await waitFor(() => !controller.dirty, 'Overwrite must finish saving the changed merged layout');
+        diskPreset = (await window.mediaAPI.listPresets(folder)).find((preset) => preset.id === uniformPreset.id);
+        assert(diskPreset.snapshot.settings.mediaFilter === 'image' && diskPreset.snapshot.settings.gap === 7, 'Overwrite must save the changed filter and gap');
+        assert(diskPreset.snapshot.geometry[0].w === 2 && diskPreset.snapshot.geometry[0].h === 2, 'Overwrite must retain merged geometry on disk');
+        gridEl.style.width = originalWidth;
+        window.dispatchEvent(new Event('resize'));
+        assert(await controller.loadPreset(uniformPreset.id), 'The overwritten merged preset must load through the renderer and IPC');
+        assert(grid.layoutGeometry[0].w === 2 && grid.layoutGeometry[0].h === 2, 'Loading the preset must restore its merged span');
+
+        for (const mode of ['masonry', 'smart-masonry']) {
+            grid.stop();
+            grid.updateSettings({ gridMode: mode, slotCount: 12, mediaFilter: 'mixed' });
+            await grid.setMedia(files);
+            grid.pool = [...images.slice(0, 11), video];
+            grid.start();
+            await waitFor(() => grid.layoutGeometry?.length === 12 && grid.displayedItems.every((item) => item.cell.style.gridColumn && item.cell.style.gridRow), `${mode} geometry did not finish`);
+            const pair = findFullEdgePair();
+            assert(pair, `${mode} must have two tiles with a shared full edge`);
+            const firstRect = { ...rectOf(pair[0]) };
+            const secondRect = { ...rectOf(pair[1]) };
+            const originalMedia = pair[0].media;
+            ctrlClick(pair[0]);
+            pair[1].cell.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+            const mergedRect = rectOf(pair[0]);
+            assert(mergedRect.w * mergedRect.h === firstRect.w * firstRect.h + secondRect.w * secondRect.h, `${mode} merge must fill its rectangular union`);
+            assert(pair[0].media === originalMedia && !grid.displayedItems.includes(pair[1]), `${mode} merge must keep first media and release the second tile`);
+            await wait(100);
+            assert(sameGeometry(rectOf(pair[0]), mergedRect), `${mode} layout work must not overwrite the merged geometry`);
+            assertNoOverlap();
+        }
+
+        grid.stop();
+        controller.dirty = false;
+        return { horizontal: true, vertical: true, repeated: true, invalidRejected: 3, presets: 1, masonryModes: 2 };
+    });
+
+    assert(results.length === 8 * repetitions, `The complete suite must produce ${8 * repetitions} case runs`);
     grid.stop();
     grid.layoutWorker.dispose();
     grid.metadata.dispose();
