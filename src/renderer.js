@@ -861,6 +861,7 @@ class MediaGrid extends MasonryLayout {
             if (item.transitionTimer) clearTimeout(item.transitionTimer);
             item.transitionTimer = null;
             item.renderVersion += 1;
+            this._restoreMediaVisibility(item.mediaEl);
             this._removeVideoHandler(item);
             if (item.media?.type === "video" && item.mediaEl) item.mediaEl.loop = true;
             if (!item.media) this._fillLockedPlaceholder(item);
@@ -892,6 +893,13 @@ class MediaGrid extends MasonryLayout {
         return true;
     }
 
+    _restoreMediaVisibility(element) {
+        if (!element) return;
+        element.classList.remove("fade-out");
+        element.style.opacity = "1";
+        element.style.transition = "";
+    }
+
     swapItems(aOrIndex, bOrIndex) {
         const a = this._resolveItem(aOrIndex);
         const b = this._resolveItem(bOrIndex);
@@ -903,6 +911,7 @@ class MediaGrid extends MasonryLayout {
             if (item.transitionTimer) clearTimeout(item.transitionTimer);
             item.transitionTimer = null;
             item.renderVersion += 1;
+            this._restoreMediaVisibility(item.mediaEl);
             this._removeVideoHandler(item);
         }
         const [aMedia, aEl, aLocked, aMissingKey] = [a.media, a.mediaEl, a.locked, a.missingMediaKey];
@@ -1089,15 +1098,66 @@ function showMessage(title, message) {
 
 function openSettings() {
     settingsPanel.classList.add("open");
+    settingsToggle.hidden = true;
     renderIgnoredGallery();
 }
 function closeSettings() {
     settingsPanel.classList.remove("open");
+    settingsToggle.hidden = false;
     releaseIgnoredGallery();
 }
 function toggleSettings() {
-    settingsPanel.classList.toggle("open");
+    if (settingsPanel.classList.contains("open")) closeSettings();
+    else openSettings();
 }
+
+const settingsGroups = [
+    { title: "Layout", ids: ["[data-mode]", "[data-redraw]", "[data-fit-mode]", "#slots-slider", "#gap-slider"] },
+    { title: "Playback", ids: ["[data-media-filter]", "#image-time-slider", "[data-video]", "#pause-btn", "#fullscreen-btn"] },
+    { title: "Saved", ids: ["#preset-select", "#restore-ignored"] },
+];
+const settingsTabs = document.createElement("div");
+settingsTabs.className = "settings-tabs";
+settingsTabs.setAttribute("role", "tablist");
+settingsTabs.setAttribute("aria-label", "Settings sections");
+settingsPanel.querySelector(".settings-section").after(settingsTabs);
+const settingsPages = settingsGroups.map((group, index) => {
+    const page = document.createElement("section");
+    page.className = "settings-page";
+    page.id = `settings-page-${index}`;
+    page.setAttribute("role", "tabpanel");
+    page.hidden = index !== 0;
+    for (const selector of group.ids) page.appendChild(settingsPanel.querySelector(selector).closest(".settings-section"));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = `settings-tab-${index}`;
+    button.textContent = group.title;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", page.id);
+    button.setAttribute("aria-selected", String(index === 0));
+    button.tabIndex = index === 0 ? 0 : -1;
+    page.setAttribute("aria-labelledby", button.id);
+    settingsTabs.appendChild(button);
+    settingsPanel.querySelector(".hint").before(page);
+    button.addEventListener("click", () => {
+        settingsPages.forEach((entry) => {
+            const selected = entry.page === page;
+            entry.page.hidden = !selected;
+            entry.button.setAttribute("aria-selected", String(selected));
+            entry.button.tabIndex = selected ? 0 : -1;
+        });
+        releaseIgnoredGallery();
+        if (group.title === "Saved") renderIgnoredGallery();
+    });
+    button.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        event.preventDefault();
+        const next = (index + (event.key === "ArrowRight" ? 1 : 2)) % 3;
+        settingsPages[next].button.click();
+        settingsPages[next].button.focus();
+    });
+    return { page, button };
+});
 
 settingsToggle.addEventListener("click", toggleSettings);
 settingsClose.addEventListener("click", closeSettings);

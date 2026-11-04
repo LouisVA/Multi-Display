@@ -206,6 +206,13 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
         controller.files = allFiles;
         controller.selectedPresetId = null;
         controller.dirty = false;
+        openSettings();
+        assert(document.getElementById('settings-toggle').hidden, 'The gear must not overlap the Settings close button');
+        for (let tab = 0; tab < 3; tab++) {
+            document.getElementById(`settings-tab-${tab}`).click();
+            assert([...document.querySelectorAll('.settings-page')].filter(page => !page.hidden).length === 1, 'Only the selected Settings group must be shown');
+            assert(!document.getElementById(`settings-page-${tab}`).hidden, 'The selected Settings tab must reveal its controls');
+        }
         grid.stop();
         grid.updateSettings({ gridMode: 'uniform', slotCount: 8, imageTime: 120, videoBehavior: 'rotate', mediaFilter: 'mixed', gap: 2 });
         await grid.setMedia(allFiles);
@@ -220,6 +227,21 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
         assert(videoItem.locked && videoItem.timer === null && videoItem.mediaEl.loop, 'Clicking a video must lock it and keep it looping');
         grid.reshufflePool();
         assert(!grid.pool.some((media) => fileKey(media) === fileKey(video)), 'A pinned file must not return to the replacement pool');
+
+        const pinnedImage = grid.displayedItems[1];
+        const pinnedImageKey = fileKey(pinnedImage.media);
+        grid.updateSettings({ imageTime: 3 });
+        await waitFor(() => pinnedImage.transitionTimer !== null, 'An image must enter its rotation transition');
+        pinnedImage.cell.click();
+        await wait(750);
+        assert(pinnedImage.locked && fileKey(pinnedImage.media) === pinnedImageKey && pinnedImage.timer === null, 'A locked image must retain its file and cancel rotation');
+        assert(Number(getComputedStyle(pinnedImage.mediaEl).opacity) > 0.99, 'Locking an image during rotation must leave it visible');
+        for (const fitMode of ['crop', 'fit']) {
+            grid.updateSettings({ fitMode });
+            const badge = getComputedStyle(pinnedImage.cell, '::before');
+            assert(badge.content.includes('🔒') && Number(badge.zIndex) > 0 && badge.pointerEvents === 'none', 'The lock badge must overlay both Crop and Fit media without blocking clicks');
+        }
+        grid.updateSettings({ imageTime: 120, fitMode: 'crop' });
 
         const left = grid.displayedItems[1];
         const right = grid.displayedItems[2];
