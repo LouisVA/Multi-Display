@@ -46,6 +46,8 @@ class MediaGrid extends MasonryLayout {
         this.frozenGrid = null;
         this.pendingPins = null;
         this.onChange = null;
+        this.mergeSelection = null;
+        this.mergeStatus = "";
 
         this.settings = {
             gridMode: "uniform", // 'uniform' | 'masonry' | 'smart-masonry'
@@ -168,6 +170,7 @@ class MediaGrid extends MasonryLayout {
     }
 
     _clearGrid() {
+        this.cancelMergeSelection(false);
         this.masonryLayoutToken += 1;
         this.layoutWorker.cancel();
         this.metadata.cancel();
@@ -231,6 +234,7 @@ class MediaGrid extends MasonryLayout {
                 const pin = retainedPins.find((entry) => entry.index === i);
                 this._addCell(targetAspect, pin?.media || null, Boolean(pin), pin?.mediaKey || null);
             }
+            if (frozenGeometry?.length === visibleSlots) this._applyFrozenGeometry(frozenGeometry);
         } else {
             const { columns, rows } = frozenGeometry?.length === visibleSlots && this.frozenGrid
                 ? this.frozenGrid
@@ -771,6 +775,145 @@ class MediaGrid extends MasonryLayout {
         return Number.isInteger(itemOrIndex) ? this.displayedItems[itemOrIndex] : itemOrIndex;
     }
 
+    _setMergeStatus(message) {
+        this.mergeStatus = message;
+        this._notifyChange("merge-status", { message });
+    }
+
+    selectMergeItem(itemOrIndex) {
+        const item = this._resolveItem(itemOrIndex);
+        if (!item || !this.displayedItems.includes(item)) return false;
+        if (this.mergeSelection === item) {
+            this.cancelMergeSelection();
+            return true;
+        }
+        if (!this.mergeSelection) {
+            this.mergeSelection = item;
+            item.selectedForMerge = true;
+            item.cell.classList.add("merge-selected");
+            let badge = item.cell.querySelector(".merge-selection-badge");
+            if (!badge) {
+                badge = document.createElement("span");
+                badge.className = "merge-selection-badge";
+                badge.textContent = "MERGE";
+                item.cell.appendChild(badge);
+            }
+            this._setMergeStatus("Select a second adjacent tile. Press Escape to cancel.");
+            this._notifyChange("merge-selection", { first: item });
+            return true;
+        }
+
+        return this.mergeItems(this.mergeSelection, item);
+    }
+
+    cancelMergeSelection(notify = true) {
+        const selected = this.mergeSelection;
+        if (selected) {
+            selected.selectedForMerge = false;
+            selected.cell.classList.remove("merge-selected");
+            selected.cell.querySelector(".merge-selection-badge")?.remove();
+        }
+        this.mergeSelection = null;
+        this._setMergeStatus("");
+        if (notify && selected) this._notifyChange("merge-selection", { first: null });
+        return Boolean(selected);
+    }
+
+    _isFullEdgeNeighbor(a, b) {
+        const verticalNeighbor =
+            (a.x + a.w === b.x || b.x + b.w === a.x) &&
+            a.y === b.y && a.h === b.h;
+        const horizontalNeighbor =
+            (a.y + a.h === b.y || b.y + b.h === a.y) &&
+            a.x === b.x && a.w === b.w;
+        return verticalNeighbor || horizontalNeighbor;
+    }
+
+    mergeItems(aOrIndex, bOrIndex) {
+        const first = this._resolveItem(aOrIndex);
+        const second = this._resolveItem(bOrIndex);
+        const firstIndex = this.displayedItems.indexOf(first);
+        const secondIndex = this.displayedItems.indexOf(second);
+        if (!first || !second || first === second || firstIndex < 0 || secondIndex < 0) {
+            this._setMergeStatus("Select two visible tiles to merge.");
+            this._notifyChange("merge-invalid", { first, second, reason: "missing-tile" });
+            return false;
+        }
+
+        const currentGeometry = this._readCurrentGeometry();
+        const firstRect = currentGeometry[firstIndex];
+        const secondRect = currentGeometry[secondIndex];
+        const union = firstRect && secondRect && this._isFullEdgeNeighbor(firstRect, secondRect)
+            ? this._rectUnionIfRectangular(firstRect, secondRect)
+            : null;
+        if (!union) {
+            this._setMergeStatus("These tiles do not share a full edge. Select another tile.");
+            this._notifyChange("merge-invalid", { first, second, reason: "not-adjacent" });
+            return false;
+        }
+
+        // Freeze only after validation so an invalid merge cannot affect a pending layout.
+        const stableGeometry = this.freezeLayout();
+        const stableUnion = this._rectUnionIfRectangular(stableGeometry[firstIndex], stableGeometry[secondIndex]);
+        if (!stableUnion || !this._isFullEdgeNeighbor(stableGeometry[firstIndex], stableGeometry[secondIndex])) {
+            this._setMergeStatus("These tiles do not share a full edge. Select another tile.");
+            this._notifyChange("merge-invalid", { first, second, reason: "not-adjacent" });
+            return false;
+        }
+
+        const releasedMedia = second.media;
+        const releasedKey = this._mediaKey(releasedMedia) || second.missingMediaKey;
+        if (second.timer) clearTimeout(second.timer);
+        if (second.transitionTimer) clearTimeout(second.transitionTimer);
+        second.renderVersion += 1;
+        second.timer = null;
+        second.transitionTimer = null;
+        this._removeVideoHandler(second);
+        if (second.mediaEl) {
+            this._releaseMediaEl(second.mediaEl);
+            second.mediaEl.remove();
+        }
+        second.mediaEl = null;
+        second.media = null;
+        second.locked = false;
+        second.missingMediaKey = null;
+        second.cell.remove();
+
+        const remainingItems = this.displayedItems.filter((item) => item !== second);
+        const stillPinned = releasedKey && remainingItems.some((item) =>
+            item.locked && (this._mediaKey(item.media) || item.missingMediaKey) === releasedKey
+        );
+        if (releasedKey && !stillPinned) this.reservedMediaKeys.delete(releasedKey);
+
+        if (releasedMedia && this._filteredMediaFiles().some((media) => this._mediaKey(media) === this._mediaKey(releasedMedia))) {
+            const key = this._mediaKey(releasedMedia);
+            const stillVisible = remainingItems.some((item) => this._mediaKey(item.media) === key);
+            if (!stillVisible && !this.pool.some((media) => this._mediaKey(media) === key)) this.pool.push(releasedMedia);
+        }
+
+        const geometryByItem = new Map(this.displayedItems.map((item, index) => [item, stableGeometry[index]]));
+        this.displayedItems = remainingItems;
+        this.settings.slotCount = remainingItems.length;
+        this.frozenGeometry = remainingItems.map((item) => item === first
+            ? { ...stableUnion }
+            : { ...geometryByItem.get(item) });
+        first.targetAspect = this._rectAspect(stableUnion, this.frozenGrid.columns, this.frozenGrid.rows);
+        if (first.timer) clearTimeout(first.timer);
+        first.timer = null;
+        if (first.transitionTimer) clearTimeout(first.transitionTimer);
+        first.transitionTimer = null;
+        first.renderVersion += 1;
+        this._restoreMediaVisibility(first.mediaEl);
+        this._removeVideoHandler(first);
+        if (!first.locked && !first.transitionTimer) this._scheduleRotation(first);
+
+        this.cancelMergeSelection(false);
+        this._applyFrozenGeometry();
+        this._setMergeStatus("Tiles merged.");
+        this._notifyChange("merge", { first, removed: second, slotCount: remainingItems.length, geometry: this.frozenGeometry });
+        return true;
+    }
+
     _applyFrozenGeometry(geometry = this.frozenGeometry) {
         if (!Array.isArray(geometry)) return;
         for (let index = 0; index < Math.min(geometry.length, this.displayedItems.length); index++) {
@@ -778,49 +921,67 @@ class MediaGrid extends MasonryLayout {
             const placement = geometry[index];
             item.cell.style.gridColumn = `${placement.x} / span ${placement.w}`;
             item.cell.style.gridRow = `${placement.y} / span ${placement.h}`;
+            const dimensions = this.frozenGrid || this._currentGridDimensions();
+            item.targetAspect = this._rectAspect(placement, dimensions.columns, dimensions.rows);
         }
         this.layoutGeometry = geometry.map((placement) => ({ ...placement }));
+    }
+
+    _currentGridDimensions() {
+        const columns = Number(this.gridEl.style.gridTemplateColumns.match(/^repeat\((\d+)/)?.[1]);
+        const rows = Number(this.gridEl.style.gridTemplateRows.match(/^repeat\((\d+)/)?.[1]);
+        if (columns > 0 && rows > 0) return { columns, rows };
+        if (this.settings.gridMode === "uniform") {
+            return this._uniformLayout(Math.max(1, this.displayedItems.length), this.settings.gap);
+        }
+        return { columns: this.masonryColumns, rows: this.masonryRows };
+    }
+
+    _readCurrentGeometry() {
+        if (this.frozenGeometry?.length === this.displayedItems.length &&
+            this.frozenGeometry.every((entry) => entry && Number.isInteger(entry.x) && Number.isInteger(entry.y))) {
+            return this.frozenGeometry.map((entry) => ({ ...entry }));
+        }
+
+        if (this.settings.gridMode === "uniform") {
+            const { columns } = this._currentGridDimensions();
+            return this.displayedItems.map((_item, index) => ({
+                x: (index % columns) + 1,
+                y: Math.floor(index / columns) + 1,
+                w: 1,
+                h: 1,
+            }));
+        }
+
+        const current = this.displayedItems.map((item) => {
+            const col = item.cell.style.gridColumn.match(/^(\d+)\s*\/\s*span\s*(\d+)/);
+            const row = item.cell.style.gridRow.match(/^(\d+)\s*\/\s*span\s*(\d+)/);
+            return col && row ? { x: Number(col[1]), y: Number(row[1]), w: Number(col[2]), h: Number(row[2]) } : null;
+        });
+        if (current.every(Boolean)) return current;
+
+        const fallback = this._buildPackedLayout(this.displayedItems.map((item, index) => ({
+            index,
+            aspect: this._masonryAspectFromSeed(item.layoutSeed, item.media?.type || "image"),
+        })));
+        const geometry = new Array(this.displayedItems.length);
+        for (const placement of fallback) {
+            geometry[placement.index] = { x: placement.x, y: placement.y, w: placement.w, h: placement.h };
+        }
+        return geometry;
     }
 
     freezeLayout() {
         this.masonryLayoutToken += 1;
         this.layoutWorker.cancel();
-        if (this.settings.gridMode === "uniform") {
-            const { columns, rows } = this.frozenGrid || this._uniformLayout(this.displayedItems.length, this.settings.gap);
-            this.frozenGrid = { columns, rows };
-        } else {
-            this.frozenGrid = { columns: this.masonryColumns, rows: this.masonryRows };
+        this.frozenGrid = this._currentGridDimensions();
+        if (this.settings.gridMode !== "uniform") this._applyMasonryGridDimensions(this.frozenGrid.columns, this.frozenGrid.rows);
+        else {
+            this.gridEl.style.gridTemplateColumns = `repeat(${this.frozenGrid.columns}, minmax(0, 1fr))`;
+            this.gridEl.style.gridTemplateRows = `repeat(${this.frozenGrid.rows}, 1fr)`;
         }
-        let current = this.displayedItems.map((item) => {
-            const col = item.cell.style.gridColumn.match(/^(\d+)\s*\/\s*span\s*(\d+)/);
-            const row = item.cell.style.gridRow.match(/^(\d+)\s*\/\s*span\s*(\d+)/);
-            return col && row ? { x: Number(col[1]), y: Number(row[1]), w: Number(col[2]), h: Number(row[2]) } : null;
-        });
-        if (this.settings.gridMode === "uniform") {
-            current = this.displayedItems.map((item, index) => ({
-                x: (index % this.frozenGrid.columns) + 1,
-                y: Math.floor(index / this.frozenGrid.columns) + 1,
-                w: 1,
-                h: 1,
-            }));
-        }
-        if (current.length && current.some((entry) => !entry) && this.settings.gridMode !== "uniform") {
-            const descriptors = this.displayedItems.map((item, index) => ({
-                index,
-                aspect: this._masonryAspectFromSeed(item.layoutSeed, item.media?.type || "image"),
-            }));
-            const placements = this._buildPackedLayout(descriptors);
-            for (const placement of placements) {
-                current[placement.index] = {
-                    x: placement.x,
-                    y: placement.y,
-                    w: placement.w,
-                    h: placement.h,
-                };
-            }
-        }
-        this.frozenGeometry = current;
-        this.layoutGeometry = current.map((entry) => ({ ...entry }));
+        this.frozenGeometry = this._readCurrentGeometry();
+        this._applyFrozenGeometry(this.frozenGeometry);
         return this.frozenGeometry;
     }
 
@@ -1042,6 +1203,7 @@ const decisionMessage = document.getElementById("decision-message");
 const decisionSave = document.getElementById("decision-save");
 const decisionDiscard = document.getElementById("decision-discard");
 const decisionCancel = document.getElementById("decision-cancel");
+const mergeStatusEl = document.getElementById("merge-status");
 
 const persistence = {
     folderPath: null,
@@ -1376,11 +1538,18 @@ persistence.loadPreset = async (presetId) => {
 };
 
 grid.onChange = (event) => {
-    setDirty();
+    if (!new Set(["merge-selection", "merge-status", "merge-invalid"]).has(event.type)) setDirty();
+    mergeStatusEl.textContent = grid.mergeStatus;
+    mergeStatusEl.hidden = !grid.mergeStatus;
+    if (event.type === "merge") {
+        slotsSlider.value = String(grid.settings.slotCount);
+        slotsValue.textContent = String(grid.settings.slotCount);
+    }
     if (event.type === "ignore" || event.type === "restore-ignored") renderIgnoredGallery();
     for (const item of grid.displayedItems) {
         item.cell.classList.toggle("is-locked", Boolean(item.locked));
         item.cell.classList.toggle("is-missing-pin", Boolean(item.locked && !item.media && item.missingMediaKey));
+        item.cell.classList.toggle("merge-selected", Boolean(item.selectedForMerge));
         item.cell.setAttribute("role", "button");
         item.cell.tabIndex = 0;
         item.cell.setAttribute("aria-label", `${item.media?.name || "Empty media slot"}${item.locked ? ", locked" : ", unlocked"}`);
@@ -1407,7 +1576,7 @@ presetName.addEventListener("input", () => {
 const modeButtons = document.querySelectorAll("[data-mode]");
 const redrawButtons = document.querySelectorAll("[data-redraw]");
 const mediaFilterButtons = document.querySelectorAll("[data-media-filter]");
-const fitModeButtons = document.querySelectorAll("[data-fit-mode]");
+const fitModeButtons = document.querySelectorAll("button[data-fit-mode]");
 
 async function updateLayoutWithConfirmation(changes) {
     if (Object.entries(changes).every(([key, value]) => grid.settings[key] === value)) return true;
@@ -1597,6 +1766,7 @@ const cellObserver = new MutationObserver((records) => {
                 cell.tabIndex = 0;
                 cell.classList.toggle("is-locked", Boolean(item?.locked));
                 cell.classList.toggle("is-missing-pin", Boolean(item?.locked && !item.media && item.missingMediaKey));
+                cell.classList.toggle("merge-selected", Boolean(item?.selectedForMerge));
                 cell.setAttribute("aria-label", `${item?.media?.name || (item?.missingMediaKey ? "File missing" : "Empty media slot")}${item?.locked ? ", locked" : ", unlocked"}`);
             }
         }
@@ -1616,6 +1786,12 @@ gridEl.addEventListener("click", (event) => {
     }
     const cell = event.target.closest?.(".grid-cell");
     const item = cell && itemForCell(cell);
+    if (event.ctrlKey) {
+        if (!item) return;
+        event.preventDefault();
+        grid.selectMergeItem(item);
+        return;
+    }
     if (item && (item.media || (item.locked && item.missingMediaKey))) {
         grid.toggleLock(item);
         cell.classList.toggle("is-locked", Boolean(item.locked));
@@ -1701,6 +1877,10 @@ window.mediaAPI.onCloseRequest(async () => {
 document.addEventListener("keydown", (e) => {
     if (!decisionDialog.hidden) {
         if (e.key === "Escape") decisionCancel.click();
+        return;
+    }
+    if (e.key === "Escape" && grid.cancelMergeSelection()) {
+        e.preventDefault();
         return;
     }
     if (e.target.matches?.("input, textarea, select, button, [contenteditable='true']")) return;

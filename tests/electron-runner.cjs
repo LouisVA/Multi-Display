@@ -9,7 +9,7 @@ const fixtures = path.join(session, 'media');
 const emptyFolder = path.join(session, 'empty-media');
 const resultsPath = path.resolve(__dirname, '../out/benchmark-results.json');
 const expectedGrowthBytes = 32 * 1024 * 1024;
-const benchmarkCaseCount = 7;
+const benchmarkCaseCount = 8;
 const minimumFreeGiB = Number(process.env.MULTI_DISPLAY_BENCHMARK_MIN_FREE_GIB || 10);
 if (!Number.isFinite(minimumFreeGiB) || minimumFreeGiB < 0) throw new Error('Invalid minimum disk reserve');
 const disk = fs.statfsSync(__dirname);
