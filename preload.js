@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('mediaAPI', {
   listPresets: (folderPath) => ipcRenderer.invoke('list-presets', folderPath),
   savePreset: (folderPath, title, snapshot, presetId) =>
     ipcRenderer.invoke('save-preset', folderPath, title, snapshot, presetId),
+  deletePreset: (folderPath, presetId) => ipcRenderer.invoke('delete-preset', folderPath, presetId),
   onCloseRequest: (callback) => {
     const listener = () => callback();
     ipcRenderer.on('app-close-request', listener);

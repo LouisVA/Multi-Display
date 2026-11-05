@@ -446,6 +446,25 @@ body {
     background: rgba(255, 255, 255, 0.12);
 }
 
+.danger-btn {
+    color: #ffb4b4;
+    border-color: rgba(255, 107, 107, 0.45);
+}
+
+.primary-btn.danger-btn {
+    background: #9f2936;
+    color: #fff;
+}
+
+.danger-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+#delete-preset {
+    margin-top: 8px;
+}
+
 .full-width {
     width: 100%;
     justify-content: center;

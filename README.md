@@ -36,7 +36,7 @@ Install the development dependencies with `npm ci`. Start the app with `npm star
 Build an installer with `npm run dist`. The installed app includes Electron and does not need Node.js.
 
 Run `npm test` to check layout scoring and grid coverage against cases from the original app.
-Run `npm run benchmark` for the complete app benchmark. It runs nine cases three times each:
+Run `npm run benchmark` for the complete app benchmark. It runs ten cases three times each:
 
 - Show the first grid in a folder with 1,000 images.
 - Limit concurrent metadata probes.
@@ -47,6 +47,7 @@ Run `npm run benchmark` for the complete app benchmark. It runs nine cases three
 - Check tile locking and swapping, ignored media, saved layout geometry, missing locked media, UI prompts, and preset storage.
 - Check Ctrl-click tile merging, valid and invalid shapes, released media, locks, and saved merged layouts.
 - Check Smart Grid optimization quality, identity preservation, Undo, and optimized preset save/load.
+- Check saved-layout deletion, confirmation and cancel behavior, draft preservation, folder isolation, and the empty-list state.
 
 The benchmark uses the installed Electron runtime and a small local video fixture.
 It has no paid model calls or AI scoring tiers. It allows 32 MiB for temporary files.
