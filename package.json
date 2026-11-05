@@ -1,6 +1,6 @@
 {
   "name": "multi-display",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Display multiple videos and images simultaneously from a folder",
   "main": "main.js",
   "scripts": {

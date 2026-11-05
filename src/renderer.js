@@ -48,6 +48,9 @@ class MediaGrid extends MasonryLayout {
         this.onChange = null;
         this.mergeSelection = null;
         this.mergeStatus = "";
+        this.optimizing = false;
+        this.optimizationVersion = 0;
+        this.optimizeUndo = null;
 
         this.settings = {
             gridMode: "uniform", // 'uniform' | 'masonry' | 'smart-masonry'
@@ -79,6 +82,9 @@ class MediaGrid extends MasonryLayout {
     }
 
     _notifyChange(type, details = {}) {
+        if (!["merge-status", "merge-selection", "merge-invalid", "optimize-status", "optimize-error", "optimize", "undo-optimize"].includes(type)) {
+            this.optimizeUndo = null;
+        }
         if (typeof this.onChange === "function") {
             this.onChange({ type, ...details });
         }
@@ -118,20 +124,25 @@ class MediaGrid extends MasonryLayout {
             return this.pool.pop();
         }
 
-        const lookahead = Math.min(18, this.pool.length);
         let bestIndex = 0;
         let bestScore = Number.POSITIVE_INFINITY;
+        const hasKnownRatios = this.mediaMetrics.size > 0 || this.metadata?.cache?.size > 0;
+        const startIndex = hasKnownRatios ? 0 : Math.max(0, this.pool.length - 18);
 
-        for (let i = this.pool.length - lookahead; i < this.pool.length; i++) {
+        // Use cached ratios across the pool. Do not miss a compatible file just
+        // because it is outside a short random sample, and do not probe the folder.
+        for (let i = startIndex; i < this.pool.length; i++) {
             const candidate = this.pool[i];
             const cacheKey = candidate.path || candidate.url;
-            const candidateAspect = this._getMediaAspect(candidate);
-            const uncertaintyPenalty = this.mediaMetrics.has(cacheKey) ? 0 : 0.2;
+            const known = this.mediaMetrics.get(cacheKey) || this.metadata?.peek(candidate);
+            const candidateAspect = known?.aspect || this._estimatedAspect(candidate.type);
+            const uncertaintyPenalty = known ? 0 : Math.log(1 / 0.7);
             const score = Math.abs(Math.log(candidateAspect / preferredAspect)) + uncertaintyPenalty;
 
             if (score < bestScore) {
                 bestScore = score;
                 bestIndex = i;
+                if (score < 0.001) break;
             }
         }
 
@@ -170,6 +181,8 @@ class MediaGrid extends MasonryLayout {
     }
 
     _clearGrid() {
+        this._cancelOptimization();
+        this.optimizeUndo = null;
         this.cancelMergeSelection(false);
         this.masonryLayoutToken += 1;
         this.layoutWorker.cancel();
@@ -607,6 +620,20 @@ class MediaGrid extends MasonryLayout {
         item.videoEndHandler = null;
     }
 
+    async _prepareRotationCandidates(item) {
+        if (!this.pool.length) this.reshufflePool(item);
+        const unknown = [];
+        for (let index = this.pool.length - 1; index >= 0; index--) {
+            const media = this.pool[index];
+            const known = this.mediaMetrics.get(this._mediaKey(media)) || this.metadata.peek(media);
+            if (known && this._visibleFractionForAspectPair(item.targetAspect, known.aspect) >= 0.9) return;
+            if (!known && unknown.length < 12) unknown.push(media);
+        }
+        // Probe a bounded set before choosing a replacement. The metadata service
+        // still runs at most four decoders, and visible media stays on screen.
+        await Promise.all(unknown.map(media => this._measureMedia(media)));
+    }
+
     // ── Rotation scheduling ──────────────────────────────────────────────────
 
     _scheduleRotation(item) {
@@ -631,13 +658,26 @@ class MediaGrid extends MasonryLayout {
         }
     }
 
-    _replaceItem(item, options = {}) {
+    async _replaceItem(item, options = {}) {
         if (!this.running || (this.paused && !options.allowPaused) || (item.locked && !options.allowLocked)) return;
+        this._cancelOptimization();
+        const hadUndo = Boolean(this.optimizeUndo);
+        this.optimizeUndo = null;
+        if (hadUndo) this._notifyChange("optimize-status");
         if (item.timer) {
             clearTimeout(item.timer);
             item.timer = null;
         }
         this._removeVideoHandler(item);
+
+        if (this.settings.gridMode === "smart-masonry" && !options.clearWhenUnavailable) {
+            const selectionVersion = ++item.renderVersion;
+            const generation = this.mediaGeneration;
+            await this._prepareRotationCandidates(item);
+            if (!this.running || !item.cell.isConnected || generation !== this.mediaGeneration ||
+                selectionVersion !== item.renderVersion || (this.paused && !options.allowPaused) ||
+                (item.locked && !options.allowLocked)) return;
+        }
 
         const newMedia = this.getNextMedia(item.targetAspect, item);
         if (!newMedia) {
@@ -733,6 +773,10 @@ class MediaGrid extends MasonryLayout {
     // ── Settings update ──────────────────────────────────────────────────────
 
     updateSettings(changes) {
+        this._cancelOptimization();
+        if (["gridMode", "slotCount", "gap", "mediaFilter"].some(key => key in changes && changes[key] !== this.settings[key])) {
+            this.optimizeUndo = null;
+        }
         const prev = { ...this.settings };
         Object.assign(this.settings, changes);
 
@@ -971,7 +1015,122 @@ class MediaGrid extends MasonryLayout {
         return geometry;
     }
 
+    _cancelOptimization() {
+        if (!this.optimizing) return;
+        this.optimizationVersion += 1;
+        this.masonryLayoutToken += 1;
+        this.layoutWorker.cancel();
+        this.optimizing = false;
+        for (const item of this.displayedItems) {
+            if (!item.timer && !item.transitionTimer) this._scheduleRotation(item);
+        }
+        this._notifyChange("optimize-status", { canceled: true });
+    }
+
+    canUndoOptimization() {
+        const snapshot = this.optimizeUndo;
+        return Boolean(snapshot && snapshot.items.length === this.displayedItems.length &&
+            snapshot.items.every((saved, index) => saved.item === this.displayedItems[index] &&
+                saved.mediaEl === saved.item.mediaEl && saved.media === saved.item.media));
+    }
+
+    async optimizeCurrentGrid() {
+        if (!this.running || !this.displayedItems.length) return false;
+        this._cancelOptimization();
+        this.cancelMergeSelection();
+        this.layoutWorker.cancel();
+        this.masonryLayoutToken += 1;
+        const token = ++this.optimizationVersion;
+        const generation = this.mediaGeneration;
+        const layoutVersion = this.layoutVersion;
+        const items = [...this.displayedItems];
+        const previous = {
+            geometry: this._readCurrentGeometry(),
+            grid: this._currentGridDimensions(),
+            gridMode: this.settings.gridMode,
+            items: items.map(item => ({ item, media: item.media, mediaEl: item.mediaEl })),
+        };
+        const isCurrent = () => token === this.optimizationVersion && this.running &&
+            generation === this.mediaGeneration && layoutVersion === this.layoutVersion &&
+            items.every((item, index) => item === this.displayedItems[index]);
+        this.optimizing = true;
+        this._notifyChange("optimize-status");
+        for (const item of items) {
+            clearTimeout(item.timer);
+            clearTimeout(item.transitionTimer);
+            item.timer = item.transitionTimer = null;
+            item.renderVersion += 1;
+            this._removeVideoHandler(item);
+            this._restoreMediaVisibility(item.mediaEl);
+        }
+        try {
+            const descriptors = await Promise.all(items.map(async (item, index) => ({
+                index,
+                aspect: item.media ? (await this._measureMedia(item.media)).aspect : 1,
+            })));
+            if (!isCurrent()) return false;
+            const result = await this.layoutWorker.calculate({
+                viewport: this._getViewport(),
+                settings: { ...this.settings, gridMode: "smart-masonry" },
+                masonryColumns: this.masonryColumns,
+                masonryRows: this.masonryRows,
+                aspectProfile: this._getAspectProfile(),
+            }, descriptors, {
+                reason: "optimize",
+                currentLayout: {
+                    placements: previous.geometry.map((rect, index) => ({ ...rect, index })),
+                    columns: previous.grid.columns,
+                    rows: previous.grid.rows,
+                },
+            });
+            if (!result || !isCurrent()) return false;
+            const { layout } = result;
+            const geometry = new Array(items.length);
+            for (const placement of layout.placements) {
+                geometry[placement.index] = { x: placement.x, y: placement.y, w: placement.w, h: placement.h };
+            }
+            if (geometry.length !== items.length || Array.from(geometry).some(rect => !rect)) throw new Error("Incomplete layout");
+            this.settings.gridMode = "smart-masonry";
+            this.gridEl.dataset.layout = "smart-masonry";
+            this.frozenGrid = { columns: layout.columns, rows: layout.rows };
+            this.frozenGeometry = geometry;
+            this._applyMasonryGridDimensions(layout.columns, layout.rows);
+            this._applyFrozenGeometry();
+            this._recordSmartLayoutDiagnostics(result.diagnostics);
+            this.optimizeUndo = previous;
+            this._notifyChange("optimize");
+            return true;
+        } catch (error) {
+            if (isCurrent()) this._notifyChange("optimize-error", { message: "Could not optimize the grid. Your layout was kept." });
+            return false;
+        } finally {
+            if (token === this.optimizationVersion) {
+                this.optimizing = false;
+                for (const item of items) {
+                    if (!item.timer && !item.transitionTimer) this._scheduleRotation(item);
+                }
+                this._notifyChange("optimize-status");
+            }
+        }
+    }
+
+    undoOptimization() {
+        if (!this.canUndoOptimization()) return false;
+        this._cancelOptimization();
+        const previous = this.optimizeUndo;
+        this.settings.gridMode = previous.gridMode;
+        this.gridEl.dataset.layout = previous.gridMode;
+        this.frozenGrid = { ...previous.grid };
+        this.frozenGeometry = previous.geometry.map(rect => ({ ...rect }));
+        this._applyMasonryGridDimensions(previous.grid.columns, previous.grid.rows);
+        this._applyFrozenGeometry();
+        this.optimizeUndo = null;
+        this._notifyChange("undo-optimize");
+        return true;
+    }
+
     freezeLayout() {
+        this._cancelOptimization();
         this.masonryLayoutToken += 1;
         this.layoutWorker.cancel();
         this.frozenGrid = this._currentGridDimensions();
@@ -986,6 +1145,7 @@ class MediaGrid extends MasonryLayout {
     }
 
     handleResize() {
+        this._cancelOptimization();
         if (this.frozenGeometry) {
             this._applyFrozenGeometry();
             return;
@@ -1204,6 +1364,31 @@ const decisionSave = document.getElementById("decision-save");
 const decisionDiscard = document.getElementById("decision-discard");
 const decisionCancel = document.getElementById("decision-cancel");
 const mergeStatusEl = document.getElementById("merge-status");
+const optimizeGridButton = document.getElementById("optimize-grid");
+const undoOptimizeGridButton = document.getElementById("undo-optimize-grid");
+const optimizeGridStatus = document.getElementById("optimize-grid-status");
+
+function syncOptimizeControls() {
+    optimizeGridButton.disabled = grid.optimizing || !grid.running || !grid.displayedItems.length;
+    optimizeGridButton.textContent = grid.optimizing ? "Optimizing…" : "Optimize current grid";
+    undoOptimizeGridButton.hidden = !grid.canUndoOptimization();
+    undoOptimizeGridButton.disabled = grid.optimizing || !grid.canUndoOptimization();
+}
+
+optimizeGridButton.addEventListener("click", async () => {
+    optimizeGridStatus.textContent = "Optimizing the current media…";
+    const pending = grid.optimizeCurrentGrid();
+    const token = grid.optimizationVersion;
+    const changed = await pending;
+    if (token !== grid.optimizationVersion) return;
+    if (changed) optimizeGridStatus.textContent = "Grid optimized. Media and locks kept. You can undo this change.";
+    else if (optimizeGridStatus.textContent === "Optimizing the current media…") optimizeGridStatus.textContent = "Optimization canceled. Your layout was kept.";
+    syncOptimizeControls();
+});
+undoOptimizeGridButton.addEventListener("click", () => {
+    if (grid.undoOptimization()) optimizeGridStatus.textContent = "Previous layout restored.";
+    syncOptimizeControls();
+});
 
 const persistence = {
     folderPath: null,
@@ -1224,6 +1409,7 @@ function setDirty(value = true) {
     persistence.dirty = Boolean(value);
     unsavedIndicator.classList.toggle("is-dirty", persistence.dirty);
     unsavedIndicator.textContent = persistence.dirty ? "Unsaved changes" : "No unsaved changes";
+    syncOptimizeControls();
 }
 setDirty(false);
 
@@ -1429,6 +1615,7 @@ showIgnoredButton.addEventListener("click", () => {
 });
 
 function syncSettingsControls() {
+    syncOptimizeControls();
     setActiveToggle(modeButtons, (button) => button.dataset.mode === grid.settings.gridMode);
     setActiveToggle(redrawButtons, (button) => (button.dataset.redraw === "on") === grid.settings.redrawOnRefresh);
     setActiveToggle(mediaFilterButtons, (button) => button.dataset.mediaFilter === grid.settings.mediaFilter);
@@ -1538,7 +1725,11 @@ persistence.loadPreset = async (presetId) => {
 };
 
 grid.onChange = (event) => {
-    if (!new Set(["merge-selection", "merge-status", "merge-invalid"]).has(event.type)) setDirty();
+    if (!["merge-selection", "merge-status", "merge-invalid", "optimize-status", "optimize-error"].includes(event.type)) setDirty();
+    syncOptimizeControls();
+    if (event.type === "optimize-error") optimizeGridStatus.textContent = event.message;
+    if (event.type === "optimize-status" && event.canceled) optimizeGridStatus.textContent = "Optimization canceled. Your layout was kept.";
+    if (event.type === "optimize" || event.type === "undo-optimize") syncSettingsControls();
     mergeStatusEl.textContent = grid.mergeStatus;
     mergeStatusEl.hidden = !grid.mergeStatus;
     if (event.type === "merge") {
