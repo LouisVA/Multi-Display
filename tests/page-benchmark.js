@@ -757,7 +757,140 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
         return { tiles: beforeItems.length, beforeVisibleFraction: +beforeQuality.toFixed(3), afterVisibleFraction: +afterQuality.toFixed(3), ignored: 1, undo: true, saved: true };
     });
 
-    assert(results.length === 9 * repetitions, `The complete suite must produce ${9 * repetitions} case runs`);
+    await check('saved-layout-deletion', async () => {
+        const controller = persistenceController;
+        const waitFor = (condition, message) => until(condition, message);
+        const select = document.getElementById('preset-select');
+        const deleteButton = document.getElementById('delete-preset');
+        const dialog = document.getElementById('decision-dialog');
+        const runId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+        const selectedFiles = await window.mediaAPI.getMediaFiles(folder);
+        const testVideo = selectedFiles.find((file) => file.type === 'video');
+        assert(testVideo, 'The deletion fixture needs its local video');
+        grid.updateSettings({ gridMode: 'uniform', slotCount: 4, imageTime: 120, mediaFilter: 'mixed', gap: 2 });
+        await grid.setMedia(selectedFiles);
+        grid.pool = [testVideo];
+        grid.start();
+        assert(grid.displayedItems.length === 4 && grid.displayedItems[0].media === testVideo, 'The deletion fixture must start with visible media');
+        grid.displayedItems[0].cell.click();
+        grid.freezeLayout();
+        const baseSnapshot = grid.exportState();
+        assert(baseSnapshot.pins.length > 0 && baseSnapshot.geometry.length === 4, 'The saved deletion fixture must include a real pin and geometry');
+        const visible = () => ({
+            items: grid.displayedItems.map((item) => ({ item, cell: item.cell, media: item.media, mediaEl: item.mediaEl, locked: item.locked })),
+            settings: { ...grid.settings }, geometry: structuredClone(grid.layoutGeometry), ignored: [...grid.ignoredMedia],
+        });
+        const assertVisible = (before, label) => {
+            assert(JSON.stringify(grid.settings) === JSON.stringify(before.settings), `${label}: settings changed`);
+            assert(JSON.stringify(grid.layoutGeometry) === JSON.stringify(before.geometry), `${label}: geometry changed`);
+            assert(JSON.stringify([...grid.ignoredMedia]) === JSON.stringify(before.ignored), `${label}: ignored media changed`);
+            assert(grid.displayedItems.length === before.items.length && before.items.every((saved, index) => {
+                const item = grid.displayedItems[index];
+                return item === saved.item && item.cell === saved.cell && item.media === saved.media && item.mediaEl === saved.mediaEl && item.locked === saved.locked;
+            }), `${label}: tiles, media, or locks changed`);
+        };
+
+        controller.folderPath = folder;
+        controller.files = selectedFiles;
+        const retained = await window.mediaAPI.savePreset(folder, `Delete retained ${runId}`, baseSnapshot);
+        const target = await window.mediaAPI.savePreset(folder, `Delete target ${runId}`, baseSnapshot);
+        for (const preset of await window.mediaAPI.listPresets(emptyFolder)) {
+            await window.mediaAPI.deletePreset(emptyFolder, preset.id);
+        }
+        assert((await window.mediaAPI.listPresets(emptyFolder)).length === 0, 'The isolated test folder must start empty');
+        const isolated = await window.mediaAPI.savePreset(emptyFolder, `Delete isolated ${runId}`, baseSnapshot);
+        controller.presets = await window.mediaAPI.listPresets(folder);
+        controller.dirty = false;
+        assert(await controller.loadPreset(target.id), 'The delete target must load through the real controller');
+        assert(select.value === target.id && !deleteButton.disabled, 'The selected target must enable Delete');
+
+        const gap = document.getElementById('gap-slider');
+        gap.value = String(Math.min(12, Number(gap.value) + 1));
+        gap.dispatchEvent(new Event('input', { bubbles: true }));
+        assert(controller.dirty, 'The delete case must begin with an unsaved draft');
+        const draft = visible();
+        const draftName = document.getElementById('preset-name').value;
+
+        deleteButton.click();
+        await waitFor(() => !dialog.hidden, 'Delete must open a confirmation dialog');
+        assert(document.activeElement === document.getElementById('decision-cancel'), 'Cancel must receive initial focus');
+        assert(document.getElementById('decision-discard').hidden, 'The delete prompt must not show Discard');
+        assert(document.getElementById('decision-save').textContent.toLowerCase().includes('delete'), 'The confirm button must say Delete');
+        document.getElementById('decision-cancel').click();
+        await waitFor(() => dialog.hidden && !controller.busy, 'Cancel must close the prompt');
+        assert((await window.mediaAPI.listPresets(folder)).some((item) => item.id === target.id), 'Cancel must keep the preset on disk');
+        assert(controller.selectedPresetId === target.id && controller.dirty, 'Cancel must preserve selection and dirty state');
+        assert(document.getElementById('preset-name').value === draftName, 'Cancel must preserve the name draft');
+        assertVisible(draft, 'Cancel must preserve the current grid');
+
+        deleteButton.click();
+        await waitFor(() => !dialog.hidden, 'Delete confirmation must reopen');
+        document.getElementById('decision-save').click();
+        await waitFor(() => dialog.hidden && !controller.busy && !controller.presets.some((item) => item.id === target.id), 'Confirmed deletion must finish');
+        assert(!controller.presets.some((item) => item.id === target.id) && controller.presets.some((item) => item.id === retained.id), 'Delete must remove only the selected entry');
+        assert((await window.mediaAPI.listPresets(folder)).every((item) => item.id !== target.id), 'The selected entry must be removed from disk');
+        assert((await window.mediaAPI.listPresets(emptyFolder)).some((item) => item.id === isolated.id), 'Delete must preserve another folder');
+        assert(controller.selectedPresetId === null && deleteButton.disabled && document.getElementById('overwrite-preset').disabled, 'Delete must clear selection and disable Delete and Overwrite');
+        assert(!document.getElementById('save-new-preset').disabled && controller.dirty, 'Delete must leave Save New enabled and the draft dirty');
+        assertVisible(draft, 'Delete must preserve the current grid');
+
+        select.value = retained.id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await waitFor(() => !dialog.hidden, 'Loading another preset must prompt before leaving a dirty draft');
+        assert(document.getElementById('decision-title').textContent.includes('Unsaved'), 'The prompt must identify the unsaved draft');
+        document.getElementById('decision-cancel').click();
+        await waitFor(() => dialog.hidden, 'Cancel must close the unsaved-changes prompt');
+        assert(controller.dirty && controller.selectedPresetId === null, 'Cancel must keep the deleted-layout draft active');
+        assertVisible(draft, 'Canceling preset load must keep the dirty draft');
+
+        document.getElementById('preset-name').value = `Draft after delete ${runId}`;
+        document.getElementById('save-new-preset').click();
+        await waitFor(() => !controller.dirty && controller.presets.some((item) => item.title === `Draft after delete ${runId}`), 'Save New must save the draft after deletion');
+        assert(![...select.options].some((option) => option.value === target.id), 'The deleted ID must stay out of the dropdown after Save New');
+
+        const cleanDeleted = controller.selectedPresetId;
+        const cleanGrid = visible();
+        assert(cleanDeleted && !controller.dirty, 'The newly saved layout must provide a clean selected state');
+        deleteButton.click();
+        await waitFor(() => !dialog.hidden, 'Deleting a clean saved layout must ask for confirmation');
+        document.getElementById('decision-save').click();
+        await waitFor(() => dialog.hidden && !controller.busy && !controller.presets.some((item) => item.id === cleanDeleted), 'The clean layout must be deleted');
+        assert(!controller.dirty, 'Deleting a clean saved layout must not create unsaved changes');
+        assertVisible(cleanGrid, 'Deleting a clean layout must preserve the current grid');
+        select.value = retained.id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await waitFor(() => controller.selectedPresetId === retained.id, 'A clean layout must load from the real dropdown');
+        assert(dialog.hidden && !controller.dirty, 'Loading a layout after clean deletion must not show an unsaved-changes prompt');
+
+        // Delete the only layout in another folder and verify the empty-list state.
+        controller.folderPath = emptyFolder;
+        controller.files = [];
+        controller.presets = await window.mediaAPI.listPresets(emptyFolder);
+        const onlyEntry = controller.presets.find((item) => item.id === isolated.id);
+        assert(onlyEntry, 'The isolated layout must still exist before its deletion');
+        select.replaceChildren(new Option('Choose a saved layout', ''), new Option(onlyEntry.title, onlyEntry.id));
+        select.value = onlyEntry.id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await waitFor(() => controller.selectedPresetId === onlyEntry.id, 'The isolated layout must become selected');
+        const beforeLastDelete = visible();
+        deleteButton.click();
+        await waitFor(() => !dialog.hidden, 'Deleting the last layout must ask for confirmation');
+        document.getElementById('decision-save').click();
+        await waitFor(() => dialog.hidden && !controller.busy && controller.presets.length === 0, 'The last layout must be deleted');
+        assert((await window.mediaAPI.listPresets(emptyFolder)).length === 0 && select.options.length === 1 && select.value === '', 'The last deletion must leave an empty list');
+        assert(deleteButton.disabled && document.getElementById('overwrite-preset').disabled, 'The empty list must disable Delete and Overwrite');
+        assertVisible(beforeLastDelete, 'Deleting the last layout must preserve the displayed grid');
+
+        controller.folderPath = folder;
+        controller.files = selectedFiles;
+        controller.presets = await window.mediaAPI.listPresets(folder);
+        controller.selectedPresetId = null;
+        controller.dirty = false;
+        grid.stop();
+        return { deleted: true, dirtyDeletePrompt: true, cleanDeleteLoad: true, folderIsolation: true, emptyList: true, savedDraft: true };
+    });
+
+    assert(results.length === 10 * repetitions, `The complete suite must produce ${10 * repetitions} case runs`);
     grid.stop();
     grid.layoutWorker.dispose();
     grid.metadata.dispose();

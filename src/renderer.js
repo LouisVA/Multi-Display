@@ -1354,6 +1354,7 @@ const presetSelect = document.getElementById("preset-select");
 const presetName = document.getElementById("preset-name");
 const saveNewPresetButton = document.getElementById("save-new-preset");
 const overwritePresetButton = document.getElementById("overwrite-preset");
+const deletePresetButton = document.getElementById("delete-preset");
 const unsavedIndicator = document.getElementById("unsaved-indicator");
 const ignoredGallery = document.getElementById("ignored-gallery");
 const showIgnoredButton = document.getElementById("restore-ignored");
@@ -1400,6 +1401,7 @@ const persistence = {
     confirmLeave: null,
     saveNew: null,
     overwrite: null,
+    deletePreset: null,
     loadPreset: null,
 };
 
@@ -1413,14 +1415,15 @@ function setDirty(value = true) {
 }
 setDirty(false);
 
-function showDecision({ title, message, saveLabel = "Save", discardLabel = "Discard", showDiscard = true } = {}) {
+function showDecision({ title, message, saveLabel = "Save", discardLabel = "Discard", showDiscard = true, destructive = false } = {}) {
     decisionTitle.textContent = title || "Save changes?";
     decisionMessage.textContent = message || "Save your layout before you leave?";
     decisionSave.textContent = saveLabel;
+    decisionSave.classList.toggle("danger-btn", destructive);
     decisionDiscard.textContent = discardLabel;
     decisionDiscard.hidden = !showDiscard;
     decisionDialog.hidden = false;
-    decisionSave.focus();
+    (destructive ? decisionCancel : decisionSave).focus();
     return new Promise((resolve) => {
         const finish = (value) => {
             decisionDialog.hidden = true;
@@ -1528,8 +1531,12 @@ function renderPresetOptions() {
         presetSelect.add(new Option(presetLabel(preset), preset.id));
     }
     presetSelect.value = selected || "";
-    overwritePresetButton.disabled = !selected || !persistence.presets.some((item) => item.id === selected);
+    const hasSelection = Boolean(selected && persistence.presets.some((item) => item.id === selected));
+    overwritePresetButton.disabled = persistence.busy || !hasSelection;
+    deletePresetButton.disabled = persistence.busy || !hasSelection;
     saveNewPresetButton.disabled = !persistence.folderPath || persistence.busy;
+    presetSelect.disabled = persistence.busy;
+    presetName.disabled = persistence.busy;
 }
 
 let ignoredObserver = null;
@@ -1638,8 +1645,7 @@ async function refreshPresets() {
 async function saveNew() {
     if (!persistence.folderPath || persistence.busy) return false;
     persistence.busy = true;
-    saveNewPresetButton.disabled = true;
-    overwritePresetButton.disabled = true;
+    renderPresetOptions();
     try {
         const preset = await window.mediaAPI.savePreset(persistence.folderPath, presetName.value, grid.exportState());
         persistence.presets.push(preset);
@@ -1652,8 +1658,7 @@ async function saveNew() {
         return false;
     } finally {
         persistence.busy = false;
-        saveNewPresetButton.disabled = !persistence.folderPath;
-        overwritePresetButton.disabled = !persistence.selectedPresetId;
+        renderPresetOptions();
     }
 }
 
@@ -1661,8 +1666,7 @@ async function overwrite() {
     if (!persistence.folderPath || !persistence.selectedPresetId) return saveNew();
     if (persistence.busy) return false;
     persistence.busy = true;
-    saveNewPresetButton.disabled = true;
-    overwritePresetButton.disabled = true;
+    renderPresetOptions();
     try {
         const preset = await window.mediaAPI.savePreset(
             persistence.folderPath, presetName.value, grid.exportState(), persistence.selectedPresetId
@@ -1676,8 +1680,37 @@ async function overwrite() {
         return false;
     } finally {
         persistence.busy = false;
-        saveNewPresetButton.disabled = !persistence.folderPath;
-        overwritePresetButton.disabled = !persistence.selectedPresetId;
+        renderPresetOptions();
+    }
+}
+
+async function deleteSelectedPreset() {
+    if (persistence.busy || !persistence.folderPath || !persistence.selectedPresetId) return false;
+    const selected = persistence.presets.find(preset => preset.id === persistence.selectedPresetId);
+    if (!selected) return false;
+    const folderPath = persistence.folderPath;
+    persistence.busy = true;
+    renderPresetOptions();
+    try {
+        const choice = await showDecision({
+            title: "Delete saved layout?",
+            message: `Delete “${presetLabel(selected)}”? Your current grid and media files will stay.`,
+            saveLabel: "Delete",
+            showDiscard: false,
+            destructive: true,
+        });
+        if (choice !== "save" || persistence.folderPath !== folderPath || persistence.selectedPresetId !== selected.id) return false;
+        await window.mediaAPI.deletePreset(folderPath, selected.id);
+        persistence.presets = persistence.presets.filter(preset => preset.id !== selected.id);
+        persistence.selectedPresetId = null;
+        renderPresetOptions();
+        return true;
+    } catch (error) {
+        await showMessage("Could not delete layout", error.message || "The saved layout was not deleted.");
+        return false;
+    } finally {
+        persistence.busy = false;
+        renderPresetOptions();
     }
 }
 
@@ -1707,9 +1740,10 @@ async function confirmLeave(reason = "leave") {
 
 persistence.saveNew = saveNew;
 persistence.overwrite = overwrite;
+persistence.deletePreset = deleteSelectedPreset;
 persistence.confirmLeave = confirmLeave;
 persistence.loadPreset = async (presetId) => {
-    if (!presetId) return false;
+    if (!presetId || persistence.busy) return false;
     if (!(await confirmLeave("open another layout"))) return false;
     const preset = persistence.presets.find((item) => item.id === presetId);
     if (!preset) return false;
@@ -1749,11 +1783,12 @@ grid.onChange = (event) => {
 
 saveNewPresetButton.addEventListener("click", saveNew);
 overwritePresetButton.addEventListener("click", overwrite);
+deletePresetButton.addEventListener("click", deleteSelectedPreset);
 presetSelect.addEventListener("change", async () => {
     const targetId = presetSelect.value;
     if (!targetId) {
         persistence.selectedPresetId = null;
-        overwritePresetButton.disabled = true;
+        renderPresetOptions();
         return;
     }
     if (!(await persistence.loadPreset(targetId))) renderPresetOptions();
@@ -2039,6 +2074,10 @@ gridEl.addEventListener("drop", (event) => {
 gridEl.addEventListener("dragend", () => { draggedItem = null; });
 
 window.mediaAPI.onCloseRequest(async () => {
+    if (persistence.busy || !decisionDialog.hidden) {
+        await window.mediaAPI.resolveClose("cancel");
+        return;
+    }
     if (!persistence.dirty) {
         releaseIgnoredGallery();
         await window.mediaAPI.resolveClose("discard");

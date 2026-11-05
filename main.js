@@ -8,6 +8,7 @@ let mainWindow;
 let closeRequestPending = false;
 let allowWindowClose = false;
 let rendererReady = false;
+const presetWrites = new Map();
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -86,35 +87,41 @@ ipcMain.handle('list-presets', async (_event, folderPath) => {
 });
 
 ipcMain.handle('save-preset', async (_event, folderPath, title, snapshot, presetId = null) => {
-  const file = presetFile(folderPath);
   const validSnapshot = validateSnapshot(snapshot);
   const cleanTitle = typeof title === 'string' ? title.trim().slice(0, 80) : '';
-  let data = { version: 1, presets: [] };
-  try {
-    data = validatePresetFile(JSON.parse(await fs.promises.readFile(file, 'utf8')));
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw new Error('Saved layouts could not be read.');
+  return updatePresets(folderPath, (data) => {
+    const now = new Date().toISOString();
+    let preset = presetId ? data.presets.find((item) => item.id === presetId) : null;
+    if (presetId && !preset) throw new Error('The selected saved layout no longer exists.');
+    if (preset) {
+      preset.title = cleanTitle || preset.title;
+      preset.updatedAt = now;
+      preset.snapshot = validSnapshot;
+    } else {
+      if (data.presets.length >= 200) throw new Error('This folder already has 200 saved layouts.');
+      preset = {
+        id: crypto.randomUUID(),
+        title: cleanTitle,
+        createdAt: now,
+        updatedAt: now,
+        snapshot: validSnapshot,
+      };
+      data.presets.push(preset);
+    }
+    return preset;
+  });
+});
+
+ipcMain.handle('delete-preset', async (_event, folderPath, presetId) => {
+  if (typeof presetId !== 'string' || !presetId.trim() || presetId.length > 80) {
+    throw new Error('A valid saved layout is required.');
   }
-  const now = new Date().toISOString();
-  let preset = presetId ? data.presets.find((item) => item.id === presetId) : null;
-  if (presetId && !preset) throw new Error('The selected saved layout no longer exists.');
-  if (preset) {
-    preset.title = cleanTitle || preset.title;
-    preset.updatedAt = now;
-    preset.snapshot = validSnapshot;
-  } else {
-    if (data.presets.length >= 200) throw new Error('This folder already has 200 saved layouts.');
-    preset = {
-      id: crypto.randomUUID(),
-      title: cleanTitle,
-      createdAt: now,
-      updatedAt: now,
-      snapshot: validSnapshot,
-    };
-    data.presets.push(preset);
-  }
-  await writeJsonAtomically(file, { version: 1, presets: data.presets });
-  return preset;
+  return updatePresets(folderPath, (data) => {
+    const index = data.presets.findIndex((preset) => preset.id === presetId);
+    if (index < 0) throw new Error('The selected saved layout no longer exists.');
+    data.presets.splice(index, 1);
+    return presetId;
+  });
 });
 
 ipcMain.handle('resolve-close', async (_event, action) => {
@@ -138,6 +145,28 @@ const IMAGE_EXTENSIONS = new Set([
 const VIDEO_EXTENSIONS = new Set([
   '.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v', '.ogv',
 ]);
+
+function updatePresets(folderPath, update) {
+  const file = presetFile(folderPath);
+  const previous = presetWrites.get(file) || Promise.resolve();
+  const pending = previous.catch(() => {}).then(async () => {
+    let data = { version: 1, presets: [] };
+    try {
+      data = validatePresetFile(JSON.parse(await fs.promises.readFile(file, 'utf8')));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw new Error('Saved layouts could not be read.');
+    }
+    const result = update(data);
+    await writeJsonAtomically(file, data);
+    return result;
+  });
+  presetWrites.set(file, pending);
+  const release = () => {
+    if (presetWrites.get(file) === pending) presetWrites.delete(file);
+  };
+  pending.then(release, release);
+  return pending;
+}
 
 function presetFile(folderPath) {
   if (typeof folderPath !== 'string' || !path.isAbsolute(folderPath)) {
