@@ -1704,7 +1704,6 @@ async function deleteSelectedPreset() {
         persistence.presets = persistence.presets.filter(preset => preset.id !== selected.id);
         persistence.selectedPresetId = null;
         renderPresetOptions();
-        setDirty();
         return true;
     } catch (error) {
         await showMessage("Could not delete layout", error.message || "The saved layout was not deleted.");

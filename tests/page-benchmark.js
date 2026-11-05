@@ -834,10 +834,33 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
         assert(!document.getElementById('save-new-preset').disabled && controller.dirty, 'Delete must leave Save New enabled and the draft dirty');
         assertVisible(draft, 'Delete must preserve the current grid');
 
+        select.value = retained.id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await waitFor(() => !dialog.hidden, 'Loading another preset must prompt before leaving a dirty draft');
+        assert(document.getElementById('decision-title').textContent.includes('Unsaved'), 'The prompt must identify the unsaved draft');
+        document.getElementById('decision-cancel').click();
+        await waitFor(() => dialog.hidden, 'Cancel must close the unsaved-changes prompt');
+        assert(controller.dirty && controller.selectedPresetId === null, 'Cancel must keep the deleted-layout draft active');
+        assertVisible(draft, 'Canceling preset load must keep the dirty draft');
+
         document.getElementById('preset-name').value = `Draft after delete ${runId}`;
         document.getElementById('save-new-preset').click();
         await waitFor(() => !controller.dirty && controller.presets.some((item) => item.title === `Draft after delete ${runId}`), 'Save New must save the draft after deletion');
         assert(![...select.options].some((option) => option.value === target.id), 'The deleted ID must stay out of the dropdown after Save New');
+
+        const cleanDeleted = controller.selectedPresetId;
+        const cleanGrid = visible();
+        assert(cleanDeleted && !controller.dirty, 'The newly saved layout must provide a clean selected state');
+        deleteButton.click();
+        await waitFor(() => !dialog.hidden, 'Deleting a clean saved layout must ask for confirmation');
+        document.getElementById('decision-save').click();
+        await waitFor(() => dialog.hidden && !controller.busy && !controller.presets.some((item) => item.id === cleanDeleted), 'The clean layout must be deleted');
+        assert(!controller.dirty, 'Deleting a clean saved layout must not create unsaved changes');
+        assertVisible(cleanGrid, 'Deleting a clean layout must preserve the current grid');
+        select.value = retained.id;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        await waitFor(() => controller.selectedPresetId === retained.id, 'A clean layout must load from the real dropdown');
+        assert(dialog.hidden && !controller.dirty, 'Loading a layout after clean deletion must not show an unsaved-changes prompt');
 
         // Delete the only layout in another folder and verify the empty-list state.
         controller.folderPath = emptyFolder;
@@ -864,7 +887,7 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
         controller.selectedPresetId = null;
         controller.dirty = false;
         grid.stop();
-        return { deleted: true, cancel: true, folderIsolation: true, emptyList: true, savedDraft: true };
+        return { deleted: true, dirtyDeletePrompt: true, cleanDeleteLoad: true, folderIsolation: true, emptyList: true, savedDraft: true };
     });
 
     assert(results.length === 10 * repetitions, `The complete suite must produce ${10 * repetitions} case runs`);
