@@ -220,6 +220,7 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
             return preset;
         };
         const fileKey = (media) => media?.path || media?.url;
+        const sameGeometry = (a, b) => JSON.stringify(a) === JSON.stringify(b);
         const allFiles = files;
         const controller = persistenceController;
         controller.folderPath = folder;
@@ -588,7 +589,175 @@ async function runPerformanceSuite(folder, repetitions, emptyFolder) {
         return { horizontal: true, vertical: true, repeated: true, invalidRejected: 3, presets: 1, masonryModes: 2 };
     });
 
-    assert(results.length === 8 * repetitions, `The complete suite must produce ${8 * repetitions} case runs`);
+    await check('smart-grid-optimization-and-undo', async () => {
+        const waitFor = (condition, message) => until(condition, message);
+        const fileKey = (media) => media?.path || media?.url;
+        const sameGeometry = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        const imageIds = [5, 30, 11, 24, 4, 31, 3, 25, 10, 18, 2];
+        const optimizeImages = imageIds.map((index) => images.find((media) => media.name === `${index}.png`));
+        assert(optimizeImages.every(Boolean) && video, 'The optimization fixture must contain all selected image ratios and a video');
+        const ctrlClick = (item) => item.cell.dispatchEvent(new MouseEvent('click', {
+            bubbles: true, cancelable: true, ctrlKey: true,
+        }));
+        const fileGeometry = () => grid._readCurrentGeometry().map((rect) => ({ ...rect }));
+        const score = (items, geometry, dimensions, aspects) => items.reduce((sum, item, index) => {
+            const cellAspect = grid._rectAspect(geometry[index], dimensions.columns, dimensions.rows);
+            return sum + grid._visibleFractionForAspectPair(cellAspect, aspects[index]);
+        }, 0) / Math.max(items.length, 1);
+
+        grid.stop();
+        grid.updateSettings({ gridMode: 'uniform', slotCount: 12, imageTime: 120, videoBehavior: 'rotate', mediaFilter: 'mixed', fitMode: 'crop', gap: 2 });
+        await grid.setMedia(files);
+        grid.pendingPins = [{ index: 0, media: video, mediaKey: fileKey(video) }];
+        grid.pool = [...optimizeImages];
+        grid.start();
+        assert(grid.displayedItems.length === 12, 'The optimization fixture must start with 12 visible media items');
+
+        // Create an intentionally poor but valid frozen layout with real image files.
+        grid.gridEl.style.gridTemplateColumns = 'repeat(1, minmax(0, 1fr))';
+        grid.gridEl.style.gridTemplateRows = 'repeat(12, 1fr)';
+        grid.frozenGrid = { columns: 1, rows: 12 };
+        grid.frozenGeometry = grid.displayedItems.map((_item, index) => ({ x: 1, y: index + 1, w: 1, h: 1 }));
+        grid._applyFrozenGeometry();
+
+        const controller = persistenceController;
+        controller.folderPath = folder;
+        controller.files = files;
+        controller.presets = await window.mediaAPI.listPresets(folder);
+        controller.selectedPresetId = null;
+        controller.dirty = false;
+        const lockedTile = grid.displayedItems[0];
+        assert(lockedTile.media.type === 'video', 'The pinned first tile must be a video');
+        assert(lockedTile.locked, 'The optimization fixture must contain a locked tile');
+        lockedTile.cell.click();
+        assert(!lockedTile.locked, 'The video lock must respond to a real tile click');
+        lockedTile.cell.click();
+        assert(lockedTile.locked, 'The video lock must be restored by a second real tile click');
+        const videoElement = lockedTile.mediaEl;
+        await waitFor(() => videoElement.videoWidth > 0, 'The optimization video must load actual metadata');
+        videoElement.currentTime = 0.05;
+        await wait(25);
+        videoElement.pause();
+        const videoTime = videoElement.currentTime;
+        assert(videoElement.loop && videoElement.paused, 'The locked video must loop and stay paused before optimization');
+
+        const ignoredTile = grid.displayedItems[4];
+        const ignoredKey = fileKey(ignoredTile.media);
+        ignoredTile.cell.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        assert(grid.ignoredMedia.has(ignoredKey), 'The optimization fixture must contain ignored media');
+        await waitFor(() => fileKey(ignoredTile.media) !== ignoredKey && ignoredTile.mediaEl?.naturalWidth > 0, 'Ignored media was not replaced');
+
+        const mergedTile = lockedTile;
+        const releasedTile = grid.displayedItems[1];
+        const releasedMediaKey = fileKey(releasedTile.media);
+        ctrlClick(mergedTile);
+        releasedTile.cell.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+        assert(grid.displayedItems.length === 11 && mergedTile.locked, 'The optimization fixture must contain a locked merged tile');
+        assert(!grid.ignoredMedia.has(releasedMediaKey), 'Merging must not add the released media to the ignored set');
+
+        const beforeItems = [...grid.displayedItems];
+        const beforeIdentities = beforeItems.map((item) => ({ item, cell: item.cell, media: item.media, mediaEl: item.mediaEl, locked: item.locked }));
+        const beforeIgnored = [...grid.ignoredMedia];
+        const beforeGeometry = fileGeometry();
+        const beforeDimensions = { ...grid._currentGridDimensions() };
+        const beforeAspects = await Promise.all(beforeItems.map(async (item) => {
+            if (!item.media) return 1;
+            return (await grid._measureMedia(item.media)).aspect;
+        }));
+        const beforeQuality = score(beforeItems, beforeGeometry, beforeDimensions, beforeAspects);
+        assert(beforeQuality < 0.3, `The frozen test layout must have poor crop visibility before optimization: ${beforeQuality}`);
+        assert(beforeGeometry[0].h === 2 && beforeGeometry[0].w === 1, 'The first tile must be merged before optimization');
+
+        const fadeTile = beforeItems.find((item) => !item.locked && item !== mergedTile);
+        const fadingMedia = fadeTile.media;
+        const fadingElement = fadeTile.mediaEl;
+        grid._replaceItem(fadeTile);
+        await waitFor(() => fadeTile.transitionTimer !== null, 'A pending tile fade must exist before optimization');
+
+        const staleLayout = grid.layoutWorker.calculate({
+            viewport: grid._getViewport(),
+            settings: { ...grid.settings, gridMode: 'smart-masonry' },
+            masonryColumns: grid.masonryColumns,
+            masonryRows: grid.masonryRows,
+            aspectProfile: grid._getAspectProfile(),
+        }, beforeAspects.map((aspect, index) => ({ index, aspect })), { reason: 'pre-optimization-stale-layout' });
+
+        openSettings();
+        document.getElementById('settings-tab-0').click();
+        const optimizeButton = document.getElementById('optimize-grid');
+        optimizeButton.click();
+        await waitFor(() => grid.optimizing, 'Optimize Current Grid did not enter its busy state');
+        assert(optimizeButton.disabled, 'The Optimize button must disable while layout work is pending');
+        assert(await staleLayout === null, 'Optimization must cancel older worker results');
+        await waitFor(() => !grid.optimizing && grid.settings.gridMode === 'smart-masonry', 'The current grid did not finish Smart optimization');
+
+        const afterItems = [...grid.displayedItems];
+        assert(afterItems.length === beforeItems.length, 'Optimization must keep the visible tile count');
+        assert(afterItems.every((item, index) => item === beforeIdentities[index].item && item.cell === beforeIdentities[index].cell && item.media === beforeIdentities[index].media && item.mediaEl === beforeIdentities[index].mediaEl && item.locked === beforeIdentities[index].locked), 'Optimization must preserve tile, DOM, media, and lock identities');
+        assert(JSON.stringify([...grid.ignoredMedia]) === JSON.stringify(beforeIgnored), 'Optimization must keep the ignored media set');
+        assert(!sameGeometry(grid.layoutGeometry, beforeGeometry), 'Optimization must reflow the frozen geometry');
+        assert(mergedTile.locked && grid.displayedItems[0] === mergedTile && mergedTile.mediaEl === videoElement, 'The locked merged tile must stay as one tile with the same video element');
+        assert(videoElement.loop && videoElement.paused && Math.abs(videoElement.currentTime - videoTime) < 0.03, 'Optimization must preserve video loop, pause, and playback position');
+
+        const optimizedGeometry = fileGeometry();
+        const optimizedDimensions = { ...grid._currentGridDimensions() };
+        const afterQuality = score(afterItems, optimizedGeometry, optimizedDimensions, beforeAspects);
+        assert(afterQuality > beforeQuality + 0.1, `Actual media ratios must show better crop visibility after optimization: ${beforeQuality} → ${afterQuality}`);
+        for (const fitMode of ['fit', 'crop']) {
+            document.querySelector(`button[data-fit-mode="${fitMode}"]`).click();
+            assert(sameGeometry(fileGeometry(), optimizedGeometry), `Changing media fit to ${fitMode} must preserve optimized geometry`);
+        }
+        await wait(650);
+        assert(fadeTile.media === fadingMedia && fadeTile.mediaEl === fadingElement && fadeTile.transitionTimer === null && !fadeTile.mediaEl.classList.contains('fade-out'), 'Optimization must cancel pending fades without replacing media later');
+
+        document.getElementById('settings-tab-2').click();
+        const runId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+        const title = `Optimized smart layout ${runId}`;
+        document.getElementById('preset-name').value = title;
+        const presetCount = controller.presets.length;
+        document.getElementById('save-new-preset').click();
+        await waitFor(() => controller.presets.length === presetCount + 1, 'Save New must store the optimized layout through IPC');
+        const saved = controller.presets.find((preset) => preset.title === title);
+        const diskSaved = (await window.mediaAPI.listPresets(folder)).find((preset) => preset.id === saved.id);
+        assert(diskSaved.snapshot.settings.gridMode === 'smart-masonry' && sameGeometry(diskSaved.snapshot.geometry, optimizedGeometry), 'The saved preset file must retain optimized geometry');
+        assert(diskSaved.snapshot.pins.some((pin) => pin.index === 0 && pin.mediaKey === fileKey(mergedTile.media)), 'The saved optimized layout must keep its pinned merged media');
+        assert(diskSaved.snapshot.ignored.includes(ignoredKey), 'The saved optimized layout must keep ignored media');
+
+        document.getElementById('settings-tab-0').click();
+        document.getElementById('undo-optimize-grid').click();
+        assert(grid.settings.gridMode === 'uniform' && sameGeometry(fileGeometry(), beforeGeometry), 'Undo must restore the previous mode and frozen geometry');
+        assert(beforeIdentities.every((savedItem, index) => grid.displayedItems[index] === savedItem.item && savedItem.item.media === savedItem.media && savedItem.item.mediaEl === savedItem.mediaEl), 'Undo must keep the same visible items');
+        assert(grid.ignoredMedia.has(ignoredKey) && mergedTile.locked, 'Undo must keep ignored media and locks');
+        assert(document.getElementById('undo-optimize-grid').hidden, 'Undo must be unavailable after it restores the previous layout');
+
+        // A user change during pending metadata work must cancel the second optimization.
+        grid.mediaMetrics.clear();
+        grid.metadata.cache.clear();
+        const optimizeStatus = document.getElementById('optimize-grid-status');
+        document.getElementById('optimize-grid').click();
+        await waitFor(() => grid.optimizing, 'The second optimization must enter its busy state');
+        const changedGap = document.getElementById('gap-slider');
+        changedGap.value = '5';
+        changedGap.dispatchEvent(new Event('input', { bubbles: true }));
+        const userChangedGeometry = fileGeometry();
+        await waitFor(() => !grid.optimizing && optimizeStatus.textContent.includes('canceled'), 'A user layout change must cancel optimization before stale work applies');
+        await wait(100);
+        assert(grid.settings.gridMode === 'uniform' && grid.settings.gap === 5 && sameGeometry(fileGeometry(), userChangedGeometry), 'Canceled optimization must keep the user’s layout change without applying stale geometry');
+        assert(!grid.canUndoOptimization(), 'A canceled optimization must not create a new Undo state');
+
+        controller.presets = await window.mediaAPI.listPresets(folder);
+        controller.dirty = false;
+        assert(await controller.loadPreset(saved.id), 'The optimized layout must reload from the saved preset');
+        assert(grid.settings.gridMode === 'smart-masonry' && sameGeometry(fileGeometry(), diskSaved.snapshot.geometry), 'Loading the saved preset must restore the optimized result');
+        assert(grid.ignoredMedia.has(ignoredKey) && grid.displayedItems.length === beforeItems.length, 'Loading must preserve ignored media and current tile count');
+        assert(grid.displayedItems[0].locked && fileKey(grid.displayedItems[0].media) === fileKey(mergedTile.media), 'Loading must restore the pinned merged media');
+
+        grid.stop();
+        controller.dirty = false;
+        return { tiles: beforeItems.length, beforeVisibleFraction: +beforeQuality.toFixed(3), afterVisibleFraction: +afterQuality.toFixed(3), ignored: 1, undo: true, saved: true };
+    });
+
+    assert(results.length === 9 * repetitions, `The complete suite must produce ${9 * repetitions} case runs`);
     grid.stop();
     grid.layoutWorker.dispose();
     grid.metadata.dispose();

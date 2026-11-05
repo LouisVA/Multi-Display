@@ -452,6 +452,11 @@ body {
     text-align: center;
 }
 
+#optimize-grid,
+#undo-optimize-grid {
+    margin-top: 8px;
+}
+
 /* ── Folder path label ────────────────────────────────────────────────────── */
 
 .folder-path {

@@ -64,7 +64,7 @@ class MasonryLayout {
         );
 
         const shortlist = [];
-        const targetCount = gridMode === "smart-masonry" ? 3 : 1;
+        const targetCount = gridMode === "smart-masonry" ? 5 : 1;
 
         for (const candidate of candidates) {
             const tooSimilar = shortlist.some((existing) => {
@@ -124,10 +124,12 @@ class MasonryLayout {
             fallbackEvaluated: false,
         };
 
+        let localRepairBest = null;
         if (diagnostics.reason === "refresh") {
             const repaired = this._repairSmartLayoutLocally(descriptors, options);
             if (repaired) {
                 diagnostics.repairCandidates = repaired.evaluatedLayouts;
+                localRepairBest = repaired.best;
                 if (this._isAcceptableSmartRepair(repaired.best)) {
                     diagnostics.usedLocalRepair = true;
                     return this._finalizeSmartLayout(repaired.best, diagnostics, startedAt, "local-repair");
@@ -138,7 +140,7 @@ class MasonryLayout {
         const gridCandidates = this._candidateMasonryGridDimensions(descriptors.length, "smart-masonry");
         const fallbackPlacements = this._buildPackedLayout(descriptors).map(({ x, y, w, h }) => ({ x, y, w, h }));
 
-        let best = null;
+        let best = localRepairBest;
 
         gridCandidates.forEach((gridCandidate, gridRank) => {
             const tilingResult = this._generateCandidateTilings(
@@ -172,6 +174,21 @@ class MasonryLayout {
             }
         });
 
+        const currentLayout = options.reason === "optimize" ? options.currentLayout : null;
+        if (currentLayout && this._isValidTiling(currentLayout.placements, currentLayout.columns, currentLayout.rows, descriptors.length)) {
+            const currentScore = this._scoreCandidateLayout(descriptors, currentLayout.placements, {
+                columns: currentLayout.columns,
+                rows: currentLayout.rows,
+                previousPlacements: this.previousSmartPlacements,
+                previousGrid: this.previousSmartGrid,
+            });
+            if (currentScore) {
+                currentScore.repairSource = "current-layout";
+                diagnostics.evaluatedLayouts += 1;
+                if (this._isBetterSmartLayoutCandidate(currentScore, best)) best = currentScore;
+            }
+        }
+
         const fallbackScore = this._scoreCandidateLayout(descriptors, fallbackPlacements, {
             columns: this.masonryColumns,
             rows: this.masonryRows,
@@ -200,6 +217,31 @@ class MasonryLayout {
         };
     }
 
+    _isValidTiling(placements, columns, rows, expectedCount) {
+        if (!Array.isArray(placements) || placements.length !== expectedCount ||
+            !Number.isInteger(columns) || columns < 1 || columns > 48 ||
+            !Number.isInteger(rows) || rows < 1 || rows > 48) {
+            return false;
+        }
+        const occupied = new Uint8Array(columns * rows);
+        for (const placement of placements) {
+            if (!placement || !Number.isInteger(placement.x) || !Number.isInteger(placement.y) ||
+                !Number.isInteger(placement.w) || !Number.isInteger(placement.h) ||
+                placement.x < 1 || placement.y < 1 || placement.w < 1 || placement.h < 1 ||
+                placement.x + placement.w - 1 > columns || placement.y + placement.h - 1 > rows) {
+                return false;
+            }
+            for (let y = placement.y - 1; y < placement.y + placement.h - 1; y++) {
+                for (let x = placement.x - 1; x < placement.x + placement.w - 1; x++) {
+                    const index = y * columns + x;
+                    if (occupied[index]) return false;
+                    occupied[index] = 1;
+                }
+            }
+        }
+        return occupied.every((cell) => cell === 1);
+    }
+
     _repairSmartLayoutLocally(descriptors, options = {}) {
         if (!this.previousSmartPlacements || !this.previousSmartGrid) {
             return null;
@@ -220,7 +262,8 @@ class MasonryLayout {
                 columns,
                 rows,
                 descriptors.length,
-                options.changedIndex
+                options.changedIndex,
+                descriptors
             )
         );
 
@@ -250,8 +293,8 @@ class MasonryLayout {
         };
     }
 
-    _buildSmartRepairVariants(placements, columns, rows, slotCount, changedIndex = null) {
-        const allowedShapes = this._getAllowedTileShapes(columns, rows, slotCount).filter((shape) => shape.area <= 9);
+    _buildSmartRepairVariants(placements, columns, rows, slotCount, changedIndex = null, descriptors = []) {
+        const allowedShapes = this._getAllowedTileShapes(columns, rows, slotCount, descriptors).filter((shape) => shape.area <= 12);
         const focusPlacements = Number.isInteger(changedIndex)
             ? placements.filter((placement) => placement.index === changedIndex)
             : placements;
@@ -420,7 +463,7 @@ class MasonryLayout {
             return { tilings: [], nodes: 0 };
         }
 
-        const shapes = this._getAllowedTileShapes(columns, rows, slotCount);
+        const shapes = this._getAllowedTileShapes(columns, rows, slotCount, descriptors);
         const totalArea = columns * rows;
         const baseCandidateLimit = slotCount <= 6 ? 132 : slotCount <= 12 ? 96 : slotCount <= 20 ? 64 : 40;
         const baseNodeLimit = slotCount <= 6 ? 2600 : slotCount <= 12 ? 2000 : slotCount <= 20 ? 1400 : 900;
@@ -792,7 +835,7 @@ class MasonryLayout {
         return regionSizes;
     }
 
-    _getAllowedTileShapes(columns, rows, slotCount) {
+    _getAllowedTileShapes(columns, rows, slotCount, descriptors = []) {
         const shapes = [
             { w: 2, h: 2, area: 4 },
             { w: 2, h: 1, area: 2 },
@@ -824,6 +867,8 @@ class MasonryLayout {
             shapes.unshift({ w: 3, h: 3, area: 9 });
         }
 
+        shapes.push(...this._getAspectTargetedShapes(columns, rows, slotCount, descriptors));
+
         return shapes.filter((shape, index, allShapes) => {
             if (shape.w > columns || shape.h > rows) {
                 return false;
@@ -831,6 +876,50 @@ class MasonryLayout {
 
             return allShapes.findIndex((candidate) => candidate.w === shape.w && candidate.h === shape.h) === index;
         });
+    }
+
+    _getAspectTargetedShapes(columns, rows, slotCount, descriptors = []) {
+        if (!descriptors.length || columns <= 0 || rows <= 0 || slotCount <= 0) return [];
+
+        const aspectGroups = new Map();
+        for (const descriptor of descriptors) {
+            const aspect = Math.max(descriptor.aspect, 0.1);
+            const bucket = Math.round(Math.log(aspect) * 4);
+            const group = aspectGroups.get(bucket) || { aspects: [], count: 0 };
+            group.aspects.push(aspect);
+            group.count += 1;
+            aspectGroups.set(bucket, group);
+        }
+
+        const viewport = this._getViewport();
+        const viewportAspect = viewport.width / Math.max(viewport.height, 1);
+        const averageArea = (columns * rows) / slotCount;
+        const maxArea = Math.min(columns * rows, Math.max(6, Math.ceil(averageArea * 2)));
+        const candidates = [];
+
+        for (const group of [...aspectGroups.values()].sort((left, right) => right.count - left.count)) {
+            const sortedAspects = group.aspects.sort((left, right) => left - right);
+            const medianAspect = sortedAspects[Math.floor(sortedAspects.length / 2)];
+            const targetSpanRatio = (medianAspect * columns) / (viewportAspect * rows);
+            const shapes = [];
+
+            for (let h = 1; h <= rows; h++) {
+                for (let w = 1; w <= columns; w++) {
+                    const area = w * h;
+                    if (area > maxArea) continue;
+                    const ratio = w / h;
+                    const ratioError = Math.abs(Math.log(ratio / targetSpanRatio));
+                    const areaError = Math.abs(Math.log(area / Math.max(averageArea, 1)));
+                    shapes.push({ w, h, area, score: ratioError + areaError * 0.16 });
+                }
+            }
+
+            shapes.sort((left, right) => left.score - right.score || left.area - right.area);
+            candidates.push(...shapes.slice(0, 2).map(({ w, h, area }) => ({ w, h, area })));
+            if (candidates.length >= 8) break;
+        }
+
+        return candidates.slice(0, 8);
     }
 
     _buildPackedLayout(descriptors) {
@@ -1148,11 +1237,7 @@ class MasonryLayout {
             return false;
         }
 
-        if (candidate.severeCropCount === 0) {
-            return true;
-        }
-
-        return candidate.worstVisibleFraction >= 0.64 && candidate.cropScore <= (this.previousSmartScore || Infinity) + 0.65;
+        return candidate.severeCropCount === 0 && candidate.worstVisibleFraction >= 0.9;
     }
 
     _finalizeSmartLayout(best, diagnostics, startedAt, source) {
