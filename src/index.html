@@ -143,6 +143,16 @@
                     <button id="fullscreen-btn" class="secondary-btn full-width">⛶ Toggle Fullscreen</button>
                 </div>
 
+                <div class="settings-section display-section">
+                    <label class="settings-label" for="grid-display-select">Grid display</label>
+                    <select id="grid-display-select" aria-describedby="grid-display-status" disabled>
+                        <option value="">No other display</option>
+                    </select>
+                    <button id="show-grid-display" class="secondary-btn full-width" disabled>Show Grid on Display</button>
+                    <button id="stop-grid-display" class="secondary-btn full-width" hidden>Stop Showing Grid</button>
+                    <p id="grid-display-status" class="setting-note" role="status"></p>
+                </div>
+
                 <p class="hint">
                     Keyboard: <kbd>S</kbd> settings &nbsp;·&nbsp; <kbd>Space</kbd> pause &nbsp;·&nbsp;
                     <kbd>F</kbd> fullscreen<br />
@@ -168,5 +178,6 @@
         <script src="layout-worker-client.js"></script>
         <script src="media-metadata.js"></script>
         <script src="renderer.js"></script>
+        <script src="display-controls.js"></script>
     </body>
 </html>

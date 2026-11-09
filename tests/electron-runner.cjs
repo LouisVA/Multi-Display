@@ -3,13 +3,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const { app, BrowserWindow } = require('electron');
+const { runDisplayBenchmark } = require('./display-benchmark.cjs');
 
 const session = path.resolve(__dirname, '../out/benchmark-session');
 const fixtures = path.join(session, 'media');
 const emptyFolder = path.join(session, 'empty-media');
 const resultsPath = path.resolve(__dirname, '../out/benchmark-results.json');
 const expectedGrowthBytes = 32 * 1024 * 1024;
-const benchmarkCaseCount = 10;
+const benchmarkCaseCount = 11;
 const minimumFreeGiB = Number(process.env.MULTI_DISPLAY_BENCHMARK_MIN_FREE_GIB || 10);
 if (!Number.isFinite(minimumFreeGiB) || minimumFreeGiB < 0) throw new Error('Invalid minimum disk reserve');
 const disk = fs.statfsSync(__dirname);
@@ -94,6 +95,7 @@ async function run() {
     const suite = fs.readFileSync(path.join(__dirname, 'page-benchmark.js'), 'utf8');
     await window.webContents.executeJavaScript(suite);
     const results = await window.webContents.executeJavaScript(`runPerformanceSuite(${JSON.stringify(fixtures)}, 3, ${JSON.stringify(emptyFolder)})`);
+    results.push(...await runDisplayBenchmark(window, fixtures, 3));
     if (errors.length) throw new Error(`Renderer errors: ${errors.join('; ')}`);
     if (results.length !== benchmarkCaseCount * 3) {
         throw new Error(`Expected ${benchmarkCaseCount * 3} benchmark runs; received ${results.length}.`);

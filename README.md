@@ -30,13 +30,21 @@ The settings panel also includes:
 - Save named layouts for the current folder. Each layout records its settings, tile positions, locked media, and ignored media. Choose Save New or Overwrite. The app asks whether to save, discard, or cancel when you leave unsaved changes. Deleting a saved layout does not change the current grid or create an unsaved edit.
 - Optimize Current Grid arranges the visible tiles for less cropping, including frozen or merged layouts. It keeps the current media and locks. Undo restores the previous layout while the visible tiles stay unchanged.
 
+### Show the grid on a wireless display
 
+1. Enable Miracast on the TV or projector.
+2. Press **Win + K** in Windows and select the display.
+3. Press **Win + P** and select **Extend**.
+4. In Multi-Display, open **Settings → Playback**. Select the display and click **Show Grid on Display**.
+5. Click **Stop Showing Grid** to close the grid on the other display.
+
+The other display shows the live grid full-screen. The controls stay in the original window.
 Install the development dependencies with `npm ci`. Start the app with `npm start`.
 
 Build an installer with `npm run dist`. The installed app includes Electron and does not need Node.js.
 
 Run `npm test` to check layout scoring and grid coverage against cases from the original app.
-Run `npm run benchmark` for the complete app benchmark. It runs ten cases three times each:
+Run `npm run benchmark` for the complete app benchmark. It runs eleven cases three times each:
 
 - Show the first grid in a folder with 1,000 images.
 - Limit concurrent metadata probes.
@@ -48,6 +56,7 @@ Run `npm run benchmark` for the complete app benchmark. It runs ten cases three 
 - Check Ctrl-click tile merging, valid and invalid shapes, released media, locks, and saved merged layouts.
 - Check Smart Grid optimization quality, identity preservation, Undo, and optimized preset save/load.
 - Check saved-layout deletion, confirmation and cancel behavior, clean and dirty draft handling, folder isolation, and the empty-list state.
+- Show a grid on a second display. Check playback, merged tiles, media rotation, and cleanup when the display disconnects.
 
 The benchmark uses the installed Electron runtime and a small local video fixture.
 It has no paid model calls or AI scoring tiers. It allows 32 MiB for temporary files.
