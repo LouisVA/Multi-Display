@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('mediaAPI', {
   deletePreset: (folderPath, presetId) => ipcRenderer.invoke('delete-preset', folderPath, presetId),
   getDisplayState: () => ipcRenderer.invoke('grid-display-state'),
   openGridDisplay: (id) => ipcRenderer.invoke('grid-display-open', id),
+  startGridCast: () => ipcRenderer.invoke('grid-cast-start'),
   closeGridDisplay: () => ipcRenderer.invoke('grid-display-close'),
   sendGridFrame: (frame) => ipcRenderer.send('grid-display-frame', frame),
   onDisplayState: (callback) => {

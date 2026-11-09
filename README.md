@@ -33,12 +33,12 @@ The settings panel also includes:
 ### Show the grid on a wireless display
 
 1. Enable Miracast on the TV or projector.
-2. Press **Win + K** in Windows and select the display.
-3. Press **Win + P** and select **Extend**.
-4. In Multi-Display, open **Settings → Playback**. Select the display and click **Show Grid on Display**.
-5. Click **Stop Showing Grid** to close the grid on the other display.
+2. Click **Cast** in Multi-Display.
+3. Select your TV or projector in the Windows picker.
 
-The other display shows the live grid full-screen. The controls stay in the original window.
+Multi-Display opens the live grid full-screen when Windows connects. The controls stay in the original window. Click **Stop Cast** to end the session.
+
+For a display that is already connected, use **Show Grid on Display** in **Settings → Playback**.
 Install the development dependencies with `npm ci`. Start the app with `npm start`.
 
 Build an installer with `npm run dist`. The installed app includes Electron and does not need Node.js.
@@ -56,7 +56,7 @@ Run `npm run benchmark` for the complete app benchmark. It runs eleven cases thr
 - Check Ctrl-click tile merging, valid and invalid shapes, released media, locks, and saved merged layouts.
 - Check Smart Grid optimization quality, identity preservation, Undo, and optimized preset save/load.
 - Check saved-layout deletion, confirmation and cancel behavior, clean and dirty draft handling, folder isolation, and the empty-list state.
-- Show a grid on a second display. Check playback, merged tiles, media rotation, and cleanup when the display disconnects.
+- Show a grid on a second display. Check playback, merged tiles, media rotation, and cleanup when the display disconnects. On Windows, check that the Cast button starts and stops the grid after a receiver is selected.
 
 The benchmark uses the installed Electron runtime and a small local video fixture.
 It has no paid model calls or AI scoring tiers. It allows 32 MiB for temporary files.

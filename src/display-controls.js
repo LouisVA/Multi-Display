@@ -4,6 +4,9 @@
     const showButton = document.getElementById("show-grid-display");
     const stopButton = document.getElementById("stop-grid-display");
     const status = document.getElementById("grid-display-status");
+    const castControls = document.getElementById("cast-controls");
+    const castButton = document.getElementById("cast-grid");
+    const castStatus = document.getElementById("cast-status");
     const mediaIds = new WeakMap();
     const videoEvents = ["play", "pause", "seeked", "ended", "loadedmetadata"];
     let nextMediaId = 0;
@@ -75,10 +78,12 @@
     }
 
     function updateButtons() {
-        select.disabled = busy || !state.displays.length;
-        showButton.disabled = busy || !select.value || Number(select.value) === state.activeId;
+        select.disabled = busy || state.connecting || !state.displays.length;
+        showButton.disabled = select.disabled || !select.value || Number(select.value) === state.activeId;
         stopButton.hidden = state.activeId === null;
         stopButton.disabled = busy;
+        castButton.disabled = busy || Boolean(state.disconnecting);
+        castButton.textContent = state.activeId !== null ? "Stop Cast" : state.connecting ? "Cancel Cast" : "Cast";
     }
 
     function updateState(next) {
@@ -97,7 +102,9 @@
         status.textContent = active ? `Showing the grid on ${active.label}.`
             : activeChanged ? "Grid display stopped."
             : state.displays.length ? "The controls stay in this window."
-            : "For Miracast, connect with Win + K. Then choose Extend with Win + P.";
+            : state.canCast ? "Use Cast to find a wireless display." : "Connect another display to show the grid.";
+        castControls.hidden = !state.canCast;
+        castStatus.textContent = state.castMessage;
         setSharing(Boolean(active));
         // Changing the target can leave the observer running if status messages arrive together.
         if (active && activeChanged) queueFrame();
@@ -124,6 +131,15 @@
     });
     stopButton.addEventListener("click", () => {
         void changeDisplay(window.mediaAPI.closeGridDisplay, "Could not stop the grid display.");
+    });
+    castButton.addEventListener("click", () => {
+        if (state.connecting || state.activeId !== null) {
+            void changeDisplay(window.mediaAPI.closeGridDisplay, "Could not stop casting.");
+        } else {
+            void window.mediaAPI.startGridCast().catch(() => {
+                castStatus.textContent = "Could not open the Windows cast picker.";
+            });
+        }
     });
     window.mediaAPI.onDisplayState(updateState);
     window.mediaAPI.getDisplayState().then(updateState).catch(() => {

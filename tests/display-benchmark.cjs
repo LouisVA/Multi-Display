@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { setTimeout: wait } = require('node:timers/promises');
 const { BrowserWindow, screen } = require('electron');
+const windowsCast = require('../src/windows-cast.cjs');
 
 async function until(condition, message) {
     const deadline = Date.now() + 5000;
@@ -33,6 +34,13 @@ async function runDisplayBenchmark(controls, folder, repetitions) {
     const controlDisplay = screen.getDisplayMatching(controls.getBounds());
     const externalDisplay = originalDisplays.call(screen).find(({ id }) => id !== controlDisplay.id);
     const target = externalDisplay || { ...controlDisplay, id: 205849731, label: 'Test display' };
+    const originalConnect = windowsCast.connectMiracast;
+    const originalDisconnect = windowsCast.disconnectMiracast;
+    const canCast = process.platform === 'win32';
+    if (canCast) {
+        const topology = await windowsCast.inspectDisplays();
+        assert(topology.some((display) => display.Width > 0 && display.Height > 0), 'The Windows helper must read the real desktop layout');
+    }
     let available = [controlDisplay];
     const defaults = await pc('({ ...grid.settings })');
     screen.getAllDisplays = () => available;
@@ -111,6 +119,36 @@ async function runDisplayBenchmark(controls, folder, repetitions) {
                 await until(() => !output(), 'Display removal must close the output');
                 await until(() => pc("document.getElementById('stop-grid-display').hidden"), 'Display removal must clear the active state');
                 assert.equal(await pc('grid.displayedItems.length'), 3, 'Stopping the output must leave the PC grid open');
+                if (canCast) {
+                    let openedPicker = false;
+                    windowsCast.connectMiracast = async (signal) => {
+                        openedPicker = true;
+                        await wait(15000, undefined, { signal });
+                    };
+                    await pc("document.getElementById('cast-grid').click()");
+                    await until(() => openedPicker, 'Cast must ask Windows to connect a receiver');
+                    await until(() => pc("document.getElementById('cast-grid').textContent === 'Cancel Cast'"), 'Cast must show its waiting state');
+                    await pc("document.getElementById('cast-grid').click()");
+                    await until(() => pc("document.getElementById('cast-grid').textContent === 'Cast'"), 'Cancel must end the pending cast');
+                    assert.equal(output(), undefined, 'Cancel must leave the other displays alone');
+
+                    let disconnected;
+                    windowsCast.disconnectMiracast = async (key) => { disconnected = key; };
+                    windowsCast.connectMiracast = async () => {
+                        available = [controlDisplay, target];
+                        screen.emit('display-added', {}, target);
+                        const bounds = screen.dipToScreenRect(null, target.bounds);
+                        return { Key: 'test-receiver', X: bounds.x, Y: bounds.y, Width: bounds.width, Height: bounds.height };
+                    };
+                    await pc("document.getElementById('cast-grid').click()");
+                    await until(() => output()?.isVisible(), 'Choosing a receiver must open the grid with no further click');
+                    await until(() => pc("document.getElementById('cast-grid').textContent === 'Stop Cast'"), 'Cast must show its active state');
+                    if (externalDisplay) assert.equal(screen.getDisplayMatching(output().getBounds()).id, target.id);
+                    await pc("document.getElementById('cast-grid').click()");
+                    await until(() => !output() && disconnected === 'test-receiver', 'Stop Cast must close the grid and release its receiver');
+                    await until(() => pc("!document.getElementById('cast-grid').disabled"), 'Stop Cast must leave Cast available');
+                    available = [controlDisplay];
+                }
                 results.push({
                     name: 'grid-on-display',
                     repetition,
@@ -118,6 +156,7 @@ async function runDisplayBenchmark(controls, folder, repetitions) {
                     externalDisplay: Boolean(externalDisplay),
                     followsLayoutAndPlayback: true,
                     stopsOnDisconnect: true,
+                    castButton: canCast,
                 });
             } catch (error) {
                 throw new Error(`grid-on-display, repetition ${repetition}: ${error.message}`, { cause: error });
@@ -125,6 +164,8 @@ async function runDisplayBenchmark(controls, folder, repetitions) {
         }
     } finally {
         output()?.destroy();
+        windowsCast.connectMiracast = originalConnect;
+        windowsCast.disconnectMiracast = originalDisconnect;
         screen.getAllDisplays = originalDisplays;
         screen.emit('display-added', {}, target);
         await pc(`grid.stop(); grid.updateSettings(${JSON.stringify(defaults)}); setDirty(false);`);
