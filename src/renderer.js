@@ -1464,7 +1464,7 @@ function toggleSettings() {
 
 const settingsGroups = [
     { title: "Layout", ids: ["[data-mode]", "[data-redraw]", "[data-fit-mode]", "#slots-slider", "#gap-slider"] },
-    { title: "Playback", ids: ["[data-media-filter]", "#image-time-slider", "[data-video]", "#pause-btn", "#fullscreen-btn"] },
+    { title: "Playback", ids: ["[data-media-filter]", "#image-time-slider", "[data-video]", "#pause-btn", "#fullscreen-btn", "#grid-display-select"] },
     { title: "Saved", ids: ["#preset-select", "#restore-ignored"] },
 ];
 const settingsTabs = document.createElement("div");

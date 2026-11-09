@@ -7,6 +7,14 @@ contextBridge.exposeInMainWorld('mediaAPI', {
   savePreset: (folderPath, title, snapshot, presetId) =>
     ipcRenderer.invoke('save-preset', folderPath, title, snapshot, presetId),
   deletePreset: (folderPath, presetId) => ipcRenderer.invoke('delete-preset', folderPath, presetId),
+  getDisplayState: () => ipcRenderer.invoke('grid-display-state'),
+  openGridDisplay: (id) => ipcRenderer.invoke('grid-display-open', id),
+  startGridCast: () => ipcRenderer.invoke('grid-cast-start'),
+  closeGridDisplay: () => ipcRenderer.invoke('grid-display-close'),
+  sendGridFrame: (frame) => ipcRenderer.send('grid-display-frame', frame),
+  onDisplayState: (callback) => {
+    ipcRenderer.on('grid-display-state', (_event, state) => callback(state));
+  },
   onCloseRequest: (callback) => {
     const listener = () => callback();
     ipcRenderer.on('app-close-request', listener);

@@ -123,6 +123,36 @@ body {
     display: none;
 }
 
+#cast-controls {
+    position: fixed;
+    top: 14px;
+    right: 62px;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100vw - 76px);
+}
+
+#cast-controls[hidden], #cast-status:empty {
+    display: none;
+}
+
+#cast-status, #cast-grid {
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+
+#cast-status {
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    font-size: 13px;
+}
+
+#cast-grid {
+    white-space: nowrap;
+}
+
 /* ── Grid cell ────────────────────────────────────────────────────────────── */
 
 .grid-cell {
@@ -495,6 +525,7 @@ body {
     line-height: 1.7;
 }
 
+.display-section select,
 .preset-section select,
 .preset-section input {
     width: 100%;
@@ -505,6 +536,15 @@ body {
     border-radius: 7px;
     background: #171720;
     color: var(--text);
+}
+
+.display-section .secondary-btn {
+    margin-top: 8px;
+}
+
+.display-section .secondary-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
 }
 
 .preset-actions,

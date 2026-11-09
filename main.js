@@ -11,6 +11,7 @@ let rendererReady = false;
 const presetWrites = new Map();
 
 function createWindow() {
+  const { setupDisplayWindow } = require('./src/display-window.cjs');
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -26,6 +27,7 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
+  setupDisplayWindow(mainWindow);
   mainWindow.webContents.once('did-finish-load', () => { rendererReady = true; });
   mainWindow.on('close', (event) => {
     if (allowWindowClose) {
